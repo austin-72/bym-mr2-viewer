@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Viewer Setup</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.5 "Segoe UI", sans-serif;
+        background: #17120c;
+        color: #efe8da;
+        padding: 24px;
+      }
+      main { max-width: 880px; margin: 0 auto; display: grid; gap: 18px; }
+      h1 { font-size: 20px; margin: 0; }
+      h2 { font-size: 15px; margin: 0 0 10px; color: #f2c76b; }
+      section {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      .muted { color: #a99f8c; font-size: 12.5px; }
+      input, textarea, button, select {
+        font: inherit;
+        color: inherit;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        padding: 8px 10px;
+      }
+      select, select option {
+        /* Opaque: translucent backgrounds go near-white in the options popup. */
+        background-color: #241c13;
+        color: #f5eddc;
+      }
+      textarea { width: 100%; resize: vertical; }
+      button { cursor: pointer; }
+      button:hover { background: rgba(255, 255, 255, 0.12); }
+      button.danger { border-color: rgba(255, 92, 74, 0.5); color: #ff8d7d; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.07); }
+      th { color: #c7bda7; font-weight: 600; }
+      #restricted { display: none; }
+      .status { min-height: 18px; font-size: 12.5px; color: #8fd9a8; }
+      .status.error { color: #ff8d7d; }
+      .audit-entry { font-size: 12.5px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+      .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgba(242,199,107,0.18); font-size: 11.5px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="row" style="justify-content: flex-start;">
+        <a href="/" style="text-decoration: none;"><button type="button">&larr; Back to map</button></a>
+      </div>
+      <h1>Viewer Setup <span class="pill">administrators only</span></h1>
+
+      <section id="identity">
+        <h2>Sign in</h2>
+        <p class="muted">
+          Sign in with your BYM account. The viewer server verifies your session
+          directly with the game server; access is limited to administrator accounts.
+        </p>
+        <div class="row" style="margin: 10px 0;">
+          <input id="email-input" type="email" placeholder="Email" autocomplete="username">
+          <input id="password-input" type="password" placeholder="Password" autocomplete="current-password">
+          <button id="login-button">Sign in</button>
+          <button id="session-button" style="display:none;">Use my viewer session</button>
+        </div>
+        <p id="identity-status" class="status"></p>
+      </section>
+
+      <div id="restricted">
+        <section>
+          <h2>Restricted</h2>
+          <p>This page is only available to viewer administrators.</p>
+        </section>
+      </div>
+
+<div id="console-mount"></div>
+    </main>
+
+    <script type="module">
+      import { STABLE_VIEWER_CONFIG, buildTokenStorageKey, fetchJson, setViewerConfig } from "/js/shared.js";
+      import { ApiClient } from "/js/api-client.js";
+
+      const $ = (id) => document.getElementById(id);
+      let authToken = "";
+
+      const api = async (path, options = {}) => {
+        const response = await fetch(path, {
+          ...options,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Viewer-Token": authToken,
+            ...(options.headers || {}),
+          },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `Request failed (${response.status})`);
+        }
+        return payload;
+      };
+
+      const setStatus = (id, message, isError = false) => {
+        const el = $(id);
+        el.textContent = message;
+        el.classList.toggle("error", isError);
+        if (message && !isError) {
+          setTimeout(() => { if (el.textContent === message) el.textContent = ""; }, 4000);
+        }
+      };
+
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+      ));
+
+      const formatBytes = (n) => n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+      const formatTime = (unixSeconds) => unixSeconds ? new Date(unixSeconds * 1000).toISOString().replace("T", " ").slice(0, 16) : "-";
+
+      // The admin console markup is injected once (see enterConsole). Its
+      // static controls - the "Hide player" and "Save announcement" buttons -
+      // are wired here, after injection. Row buttons (Unhide, Purge) are
+      // (re)wired inside renderHidden()/renderOverview() because they are
+      // recreated on every render.
+      function wireConsole() {
+        const addButton = $("hide-add");
+        if (addButton && !addButton.dataset.wired) {
+          addButton.dataset.wired = "1";
+          const submitHide = async () => {
+            const name = $("hide-name").value.trim();
+            const reason = $("hide-reason").value.trim();
+            if (!name) { setStatus("hidden-status", "Enter a player name.", true); return; }
+            try {
+              await api("/api/admin/hidden-players", {
+                method: "POST",
+                body: JSON.stringify({ action: "add", name, reason }),
+              });
+              $("hide-name").value = "";
+              $("hide-reason").value = "";
+              setStatus("hidden-status", `${name} is now hidden.`);
+              await Promise.all([renderHidden(), renderOverview()]);
+            } catch (error) { setStatus("hidden-status", error.message, true); }
+          };
+          addButton.addEventListener("click", submitHide);
+          for (const id of ["hide-name", "hide-reason"]) {
+            $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") submitHide(); });
+          }
+        }
+
+        const saveButton = $("announcement-save");
+        if (saveButton && !saveButton.dataset.wired) {
+          saveButton.dataset.wired = "1";
+          saveButton.addEventListener("click", async () => {
+            const text = $("announcement-text").value.trim();
+            try {
+              await api("/api/admin/announcement", {
+                method: "POST",
+                body: JSON.stringify({ text }),
+              });
+              setStatus("announcement-status", text ? "Announcement saved." : "Announcement cleared.");
+              await renderOverview();
+            } catch (error) { setStatus("announcement-status", error.message, true); }
+          });
+        }
+
+        const adminAdd = $("admin-add");
+        if (adminAdd && !adminAdd.dataset.wired) {
+          adminAdd.dataset.wired = "1";
+          const submitAdmin = async () => {
+            const name = $("admin-name").value.trim();
+            if (!name) { setStatus("admin-status", "Enter a username.", true); return; }
+            try {
+              await api("/api/admin/admins", {
+                method: "POST",
+                body: JSON.stringify({ action: "add", name }),
+              });
+              $("admin-name").value = "";
+              setStatus("admin-status", `${name} is now an administrator.`);
+              await Promise.all([renderAdmins(), renderOverview()]);
+            } catch (error) { setStatus("admin-status", error.message, true); }
+          };
+          adminAdd.addEventListener("click", submitAdmin);
+          $("admin-name").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAdmin(); });
+        }
+      }
+
+      const settingsInputs = () => [...document.querySelectorAll("input[id^='set-']")];
+
+      function renderApiStats(stats) {
+        if (!stats || !$("rate-stats")) return;
+        $("rate-stats").textContent =
+          `Outbound: ${stats.lastMinute} call${stats.lastMinute === 1 ? "" : "s"} in the last minute` +
+          ` · ${stats.lastHourTotal} in the last hour (avg ${stats.lastHourAvg}/min)` +
+          ` · ${stats.rewritesHour} rotated token${stats.rewritesHour === 1 ? "" : "s"} adopted` +
+          ` · up ${stats.uptimeMinutes} min`;
+
+        // 60-minute sparkline of outbound calls, oldest on the left.
+        const series = Array.isArray(stats.minuteSeries) ? stats.minuteSeries : [];
+        const peak = Math.max(1, ...series);
+        const bars = series.map((count, index) => {
+          const height = Math.max(count > 0 ? 2 : 1, Math.round((count / peak) * 38));
+          return `<rect x="${index * 5}" y="${40 - height}" width="4" height="${height}"`
+            + ` fill="${count > 0 ? "#8fd9a8" : "#3a4a3f"}"><title>${count}/min</title></rect>`;
+        }).join("");
+        $("rate-spark").innerHTML =
+          `<svg width="${series.length * 5}" height="40" style="display:block;margin:6px 0;">${bars}</svg>`;
+
+        const queue = stats.queue || {};
+        const bands = queue.byBand || {};
+        const waits = stats.waits || {};
+        $("rate-queue").textContent =
+          `Queue: ${queue.depth || 0} waiting` +
+          ` (p1-2: ${bands["1-2"] || 0}, p3-6: ${bands["3-6"] || 0},` +
+          ` p7-8: ${bands["7-8"] || 0}, p9-10: ${bands["9-10"] || 0})` +
+          ` · oldest waiter ${queue.oldestWaitSec || 0}s` +
+          ` · wait p50 ${waits.p50Ms || 0}ms / p90 ${waits.p90Ms || 0}ms / max ${waits.maxMs || 0}ms`;
+
+        const upstream = stats.upstream || {};
+        const rejects = stats.rejects || {};
+        const cache = stats.cache || {};
+        const cacheTotal = (cache.zoneReadsHour || 0) + (cache.zoneFetchesHour || 0);
+        const hitRate = cacheTotal ? Math.round(100 * (cache.zoneReadsHour || 0) / cacheTotal) : 0;
+        $("rate-health").textContent =
+          `Upstream (1h): ${upstream.count || 0} calls, ${upstream.errorsHour || 0} errors,` +
+          ` avg ${upstream.avgMs || 0}ms / p90 ${upstream.p90Ms || 0}ms` +
+          ` · 429s: ${rejects.queueFullHour || 0} queue-full, ${rejects.timeoutHour || 0} timed out` +
+          ` · zone cache: ${cache.zoneReadsHour || 0} served vs ${cache.zoneFetchesHour || 0} fetched (${hitRate}% cached)`;
+
+        const priorities = Object.entries(stats.byPriority || {})
+          .filter(([, count]) => count > 0)
+          .sort((a, b) => Number(b[0]) - Number(a[0]))
+          .map(([priority, count]) => `p${priority}: ${count}`).join(", ");
+        const categories = Object.entries(stats.byCategory || {})
+          .sort((a, b) => b[1] - a[1])
+          .map(([category, count]) => `${category}: ${count}`).join(", ");
+        $("rate-breakdown").textContent =
+          `Last hour by priority - ${priorities || "none"} · by endpoint - ${categories || "none"}`;
+
+        const users = Array.isArray(stats.topUsers) ? stats.topUsers : [];
+        $("rate-user-rows").innerHTML = users.length
+          ? users.map((entry) => `
+              <tr>
+                <td>${escapeHtml(entry.key)}</td>
+                <td>${entry.lastMinute}</td>
+                <td>${entry.lastHour}</td>
+              </tr>`).join("")
+          : '<tr><td colspan="3" class="muted">No game-API calls in the last hour.</td></tr>';
+      }
+
+      let statsPoll = null;
+      function startStatsPolling() {
+        if (statsPoll) clearInterval(statsPoll);
+        statsPoll = setInterval(async () => {
+          // Stop quietly if the console was torn down (signed out).
+          if (!$("rate-stats")) { clearInterval(statsPoll); statsPoll = null; return; }
+          try {
+            const { stats } = await api("/api/admin/api-stats");
+            renderApiStats(stats);
+          } catch { /* transient; next tick retries */ }
+        }, 5000);
+      }
+
+      async function renderSettings() {
+        const { values, stats } = await api("/api/admin/settings");
+        for (const input of settingsInputs()) {
+          const field = input.id.slice(4);
+          if (values && field in values) input.value = values[field];
+        }
+        renderApiStats(stats);
+        startStatsPolling();
+        $("rate-save").onclick = async () => {
+          try {
+            const payload = {};
+            for (const input of settingsInputs()) {
+              const value = Number(input.value);
+              if (Number.isFinite(value)) payload[input.id.slice(4)] = value;
+            }
+            const saved = await api("/api/admin/settings", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+            for (const input of settingsInputs()) {
+              const field = input.id.slice(4);
+              if (saved?.values && field in saved.values) input.value = saved.values[field];
+            }
+            setStatus("rate-status", "Limits saved and applied immediately.");
+          } catch (error) { setStatus("rate-status", error.message, true); }
+        };
+      }
+
+      async function renderWhitelist() {
+        const state = await api("/api/admin/whitelist");
+        const box = $("whitelist-enabled");
+        box.checked = Boolean(state.enabled);
+        $("whitelist-state").textContent = state.enabled
+          ? `Enforcing - ${state.names.length} player${state.names.length === 1 ? "" : "s"} allowed (plus admins).`
+          : "Off - anyone may sign in.";
+        $("whitelist-rows").innerHTML = state.names.length
+          ? state.names.map((name) => `
+              <tr>
+                <td>${escapeHtml(name)}</td>
+                <td><button class="danger" data-whitelist-remove="${escapeHtml(name)}">Remove</button></td>
+              </tr>`).join("")
+          : '<tr><td colspan="2" class="muted">Nobody listed. Enabling now would block every non-admin.</td></tr>';
+
+        for (const button of document.querySelectorAll("[data-whitelist-remove]")) {
+          button.addEventListener("click", async () => {
+            try {
+              await api("/api/admin/whitelist", {
+                method: "POST",
+                body: JSON.stringify({ action: "remove", name: button.dataset.whitelistRemove }),
+              });
+              setStatus("whitelist-status", `${button.dataset.whitelistRemove} removed.`);
+              await renderWhitelist();
+            } catch (error) { setStatus("whitelist-status", error.message, true); }
+          });
+        }
+
+        if (!box.dataset.wired) {
+          box.dataset.wired = "1";
+          box.addEventListener("change", async () => {
+            try {
+              await api("/api/admin/whitelist", {
+                method: "POST",
+                body: JSON.stringify({ enabled: box.checked }),
+              });
+              setStatus("whitelist-status", box.checked
+                ? "Whitelist enabled - only listed players (and admins) can sign in."
+                : "Whitelist disabled - sign-in open to everyone.");
+              await renderWhitelist();
+            } catch (error) {
+              box.checked = !box.checked;
+              setStatus("whitelist-status", error.message, true);
+            }
+          });
+          const submitAllow = async () => {
+            const name = $("whitelist-name").value.trim();
+            if (!name) { setStatus("whitelist-status", "Enter a username.", true); return; }
+            try {
+              await api("/api/admin/whitelist", {
+                method: "POST",
+                body: JSON.stringify({ action: "add", name }),
+              });
+              $("whitelist-name").value = "";
+              setStatus("whitelist-status", `${name} may now sign in.`);
+              await renderWhitelist();
+            } catch (error) { setStatus("whitelist-status", error.message, true); }
+          };
+          $("whitelist-add").addEventListener("click", submitAllow);
+          $("whitelist-name").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAllow(); });
+        }
+      }
+
+      async function renderHideRequests() {
+        const { requests } = await api("/api/admin/hide-requests");
+        const pending = requests.filter((r) => r.status === "pending");
+        const resolved = requests.filter((r) => r.status !== "pending").slice(0, 10);
+        const row = (r, actions) => `
+              <tr>
+                <td><strong>${escapeHtml(r.name)}</strong></td>
+                <td>${escapeHtml(r.reason || "")}</td>
+                <td class="muted">${escapeHtml((r.at || "").replace("T", " ").slice(0, 16))}</td>
+                <td class="muted">${escapeHtml(r.status)}${r.resolvedBy ? " by " + escapeHtml(r.resolvedBy) : ""}</td>
+                <td>${actions}</td>
+              </tr>`;
+        $("hide-req-rows").innerHTML = (pending.length || resolved.length)
+          ? pending.map((r) => row(r,
+              `<button data-hide-approve="${escapeHtml(r.name)}">Approve</button>
+               <button class="danger" data-hide-deny="${escapeHtml(r.name)}">Deny</button>`)).join("")
+            + resolved.map((r) => row(r, "")).join("")
+          : '<tr><td colspan="5" class="muted">No hiding requests.</td></tr>';
+        const act = async (name, action) => {
+          try {
+            await api("/api/admin/hide-requests", {
+              method: "POST",
+              body: JSON.stringify({ name, action }),
+            });
+            setStatus("hide-req-status", `${name}: ${action === "approve" ? "approved and hidden" : "denied"}.`);
+            await Promise.all([renderHideRequests(), renderHidden(), renderOverview()]);
+          } catch (error) { setStatus("hide-req-status", error.message, true); }
+        };
+        for (const button of document.querySelectorAll("[data-hide-approve]")) {
+          button.addEventListener("click", () => act(button.dataset.hideApprove, "approve"));
+        }
+        for (const button of document.querySelectorAll("[data-hide-deny]")) {
+          button.addEventListener("click", () => act(button.dataset.hideDeny, "deny"));
+        }
+      }
+
+      async function renderAlliances() {
+        const { alliances } = await api("/api/admin/alliances");
+        const rows = document.getElementById("alliance-rows");
+        rows.innerHTML = alliances.length
+          ? alliances.map((a) => `
+              <tr>
+                <td><strong>${escapeHtml(a.name)}</strong></td>
+                <td>
+                  <select data-leader-select="${escapeHtml(a.name)}">
+                    ${a.members.map((m) => `<option value="${escapeHtml(m.name)}"${m.rank === "leader" ? " selected" : ""}>${escapeHtml(m.name)} (${escapeHtml(m.rank)})</option>`).join("")}
+                  </select>
+                  <button data-set-leader="${escapeHtml(a.name)}">Set leader</button>
+                </td>
+                <td>${a.members.length}</td>
+                <td>${a.invites.length ? escapeHtml(a.invites.join(", ")) : "-"}</td>
+                <td class="muted">${a.enemies} enemies, ${a.targets} targets, ${a.chat} chat, ${a.feed} feed</td>
+                <td><button class="danger" data-delete-alliance="${escapeHtml(a.name)}">Delete</button></td>
+              </tr>`).join("")
+          : '<tr><td colspan="6" class="muted">No alliances yet.</td></tr>';
+        for (const button of document.querySelectorAll("[data-set-leader]")) {
+          button.addEventListener("click", async () => {
+            const name = button.dataset.setLeader;
+            const select = document.querySelector(`[data-leader-select="${CSS.escape(name)}"]`);
+            try {
+              await api("/api/admin/alliance-set-leader", {
+                method: "POST",
+                body: JSON.stringify({ name, leader: select.value }),
+              });
+              setStatus("alliance-status", `Leader of ${name} set to ${select.value}.`);
+              await renderAlliances();
+            } catch (error) { setStatus("alliance-status", error.message, true); }
+          });
+        }
+        for (const button of document.querySelectorAll("[data-delete-alliance]")) {
+          button.addEventListener("click", async () => {
+            const name = button.dataset.deleteAlliance;
+            if (!confirm(`Delete the alliance ${name}? Members become alliance-less; chat, targets, and feed are lost.`)) return;
+            try {
+              await api("/api/admin/alliance-delete", {
+                method: "POST",
+                body: JSON.stringify({ name }),
+              });
+              setStatus("alliance-status", `${name} deleted.`);
+              await renderAlliances();
+            } catch (error) { setStatus("alliance-status", error.message, true); }
+          });
+        }
+      }
+
+      async function renderHidden() {
+        const { players } = await api("/api/admin/hidden-players");
+        $("hidden-rows").innerHTML = players.length
+          ? players.map((p) => `
+              <tr>
+                <td><strong>${escapeHtml(p.name)}</strong></td>
+                <td>${escapeHtml(p.reason || "")}</td>
+                <td>${escapeHtml(p.hiddenBy || "")}</td>
+                <td class="muted">${escapeHtml((p.at || "").replace("T", " ").slice(0, 16))}</td>
+                <td><button class="danger" data-unhide="${escapeHtml(p.name)}">Unhide</button></td>
+              </tr>`).join("")
+          : '<tr><td colspan="5" class="muted">No hidden players.</td></tr>';
+        for (const button of document.querySelectorAll("[data-unhide]")) {
+          button.addEventListener("click", async () => {
+            try {
+              await api("/api/admin/hidden-players", {
+                method: "POST",
+                body: JSON.stringify({ action: "remove", name: button.dataset.unhide }),
+              });
+              setStatus("hidden-status", `${button.dataset.unhide} is visible again.`);
+              await Promise.all([renderHidden(), renderOverview()]);
+            } catch (error) { setStatus("hidden-status", error.message, true); }
+          });
+        }
+      }
+
+      async function renderAnnouncement() {
+        const payload = await api("/api/admin/announcement");
+        $("announcement-text").value = payload.text || "";
+      }
+
+      async function renderAdmins() {
+        const { admins, you } = await api("/api/admin/admins");
+        const canRemove = admins.length > 1;
+        $("admin-rows").innerHTML = admins.length
+          ? admins.map((name) => {
+              const isYou = you && name.toLowerCase() === String(you).toLowerCase();
+              return `
+                <tr>
+                  <td><strong>${escapeHtml(name)}</strong>${isYou ? ' <span class="muted">(you)</span>' : ""}</td>
+                  <td>${canRemove
+                    ? `<button class="danger" data-remove-admin="${escapeHtml(name)}">Remove</button>`
+                    : '<span class="muted">last admin</span>'}</td>
+                </tr>`;
+            }).join("")
+          : '<tr><td colspan="2" class="muted">No administrators.</td></tr>';
+        for (const button of document.querySelectorAll("[data-remove-admin]")) {
+          button.addEventListener("click", async () => {
+            const name = button.dataset.removeAdmin;
+            const isYou = you && name.toLowerCase() === String(you).toLowerCase();
+            if (isYou && !window.confirm(`Remove yourself (${name}) as an administrator? You will immediately lose console access.`)) {
+              return;
+            }
+            try {
+              await api("/api/admin/admins", {
+                method: "POST",
+                body: JSON.stringify({ action: "remove", name }),
+              });
+              setStatus("admin-status", `${name} is no longer an administrator.`);
+              if (isYou) { location.reload(); return; }
+              await Promise.all([renderAdmins(), renderOverview()]);
+            } catch (error) { setStatus("admin-status", error.message, true); }
+          });
+        }
+      }
+
+      async function renderOverview() {
+        const { worlds, users, audit } = await api("/api/admin/overview");
+        $("world-rows").innerHTML = worlds.length
+          ? worlds.map((w) => `
+              <tr>
+                <td>${escapeHtml(w.name)}</td>
+                <td>${w.zones}</td>
+                <td>${formatBytes(w.bytes)}</td>
+                <td class="muted">${formatTime(w.newest)}</td>
+                <td class="row">
+                  <button data-purge-stale="${escapeHtml(w.name)}">Purge &gt;24h</button>
+                  <button class="danger" data-purge-all="${escapeHtml(w.name)}">Purge all</button>
+                </td>
+              </tr>`).join("")
+          : '<tr><td colspan="5" class="muted">No cached worlds.</td></tr>';
+        for (const button of document.querySelectorAll("[data-purge-stale],[data-purge-all]")) {
+          button.addEventListener("click", async () => {
+            const world = button.dataset.purgeStale || button.dataset.purgeAll;
+            const stale = Boolean(button.dataset.purgeStale);
+            if (!stale && !confirm(`Delete the ENTIRE cached map for ${world}?`)) return;
+            try {
+              const body = stale ? { world, olderThanHours: 24 } : { world };
+              const { removed } = await api("/api/admin/purge", { method: "POST", body: JSON.stringify(body) });
+              setStatus("cache-status", `Removed ${removed} zones from ${world}.`);
+              await renderOverview();
+            } catch (error) { setStatus("cache-status", error.message, true); }
+          });
+        }
+        $("user-rows").innerHTML = users.length
+          ? users.map((u) => `
+              <tr>
+                <td>${escapeHtml(u.name)}</td>
+                <td>${u.logins}</td>
+                <td class="muted">${escapeHtml((u.lastLogin || "-").replace("T", " ").slice(0, 16))}</td>
+              </tr>`).join("")
+          : '<tr><td colspan="3" class="muted">No viewer users yet.</td></tr>';
+        $("audit-rows").innerHTML = audit.length
+          ? audit.slice().reverse().map((entry) => `
+              <div class="audit-entry">
+                <strong>${escapeHtml(entry.admin)}</strong> - ${escapeHtml(entry.action)}: ${escapeHtml(entry.detail)}
+                <span class="muted">(${escapeHtml((entry.at || "").replace("T", " ").slice(0, 16))})</span>
+              </div>`).join("")
+          : "No audit entries yet.";
+      }
+
+      let consoleLoaded = false;
+
+      async function enterConsole() {
+        try {
+          const { admin, user } = await api("/api/admin/me");
+          $("restricted").style.display = admin ? "none" : "block";
+          if (!admin) {
+            // Non-admins never receive the console markup: it is served by an
+            // endpoint that requires a verified admin session, so there is no
+            // hidden admin UI sitting in the page for them to reveal.
+            $("console-mount").innerHTML = "";
+            consoleLoaded = false;
+            setStatus("identity-status", user
+              ? `Signed in as ${user}, but this account is not an administrator.`
+              : "Your session could not be verified.", true);
+            return;
+          }
+          if (!consoleLoaded) {
+            const response = await fetch("/api/admin/console", {
+              headers: { "X-Viewer-Token": authToken },
+            });
+            if (!response.ok) {
+              throw new Error("Could not load the admin console.");
+            }
+            $("console-mount").innerHTML = await response.text();
+            consoleLoaded = true;
+            wireConsole();
+          }
+          setStatus("identity-status", `Verified as administrator ${user}.`);
+          await Promise.all([renderHidden(), renderAnnouncement(), renderAdmins(), renderOverview(), renderAlliances(), renderSettings(), renderHideRequests(), renderWhitelist()]);
+        } catch (error) {
+          // A 404 here usually means the request fell through to static file
+          // serving: the running dev_server.py predates the admin console.
+          const outdated = /404|File not found|Unexpected token/i.test(error.message);
+          setStatus(
+            "identity-status",
+            outdated
+              ? "The viewer server is running an older dev_server.py without the admin API. " +
+                "Replace dev_server.py, restart the Python process, then reload this page."
+              : error.message,
+            true,
+          );
+        }
+      }
+
+      // Admins sign in against the same fixed BYM game server the main viewer
+      // uses (STABLE_VIEWER_CONFIG), never the localhost dev defaults. The
+      // resolved api version is captured and written back into the shared
+      // config, exactly as connectToServer() does in the main app.
+      const config = STABLE_VIEWER_CONFIG;
+      let client = new ApiClient(config);
+
+      async function signIn() {
+        const email = $("email-input").value.trim();
+        const password = $("password-input").value;
+        if (!email || !password) { setStatus("identity-status", "Enter email and password.", true); return; }
+        setStatus("identity-status", "Signing in...");
+        try {
+          const resolvedApiVersion = await client.resolveApiVersion();
+          const activeConfig = setViewerConfig({ ...config, apiVersion: resolvedApiVersion });
+          client = new ApiClient(activeConfig);
+          const login = await fetchJson(client.buildApiUrl("/player/getinfo"), {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+            body: new URLSearchParams({ email, password, sessionType: "game" }),
+          });
+          if (!login?.token) { throw new Error("Sign-in failed."); }
+          authToken = login.token;
+          $("password-input").value = "";
+          await enterConsole();
+        } catch (error) {
+          setStatus("identity-status", error.message, true);
+        }
+      }
+
+      $("login-button").addEventListener("click", signIn);
+      $("password-input").addEventListener("keydown", (e) => { if (e.key === "Enter") signIn(); });
+
+      // One-click reuse of the token the main viewer already stored.
+      const storedToken = localStorage.getItem(buildTokenStorageKey(config));
+      if (storedToken) {
+        const sessionButton = $("session-button");
+        sessionButton.style.display = "";
+        sessionButton.addEventListener("click", async () => {
+          authToken = storedToken;
+          setStatus("identity-status", "Verifying viewer session...");
+          await enterConsole();
+        });
+      }
+    </script>
+  </body>
+</html>

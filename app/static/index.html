@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    >
+    <title>BYM MR2 Viewer</title>
+    <link id="app-favicon" rel="icon" type="image/png">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar" class="toolbar">
+        <div class="toolbar-brand" title="Backyard Monsters Refitted - Map Room 2 Viewer">
+          <span class="toolbar-title">MR2 Viewer</span>
+          <span id="world-name" class="toolbar-world">Not connected</span>
+        </div>
+
+        <div class="toolbar-scroll">
+          <div class="tb-group">
+            <!-- Home -->
+            <div class="tb-item">
+              <button
+                id="find-home-button"
+                class="tb-button"
+                type="button"
+                title="Center the map on your main yard"
+                disabled
+              >Home</button>
+            </div>
+
+            <!-- Bookmarks -->
+            <div class="tb-item">
+              <button class="tb-button" type="button" data-menu="menu-bookmarks" aria-expanded="false">Bookmarks</button>
+              <div id="menu-bookmarks" class="tb-menu">
+                <p class="eyebrow">Bookmarks</p>
+                <div class="bookmark-add-row">
+                  <input id="bookmark-name-input" type="text" placeholder="Bookmark name" maxlength="40" disabled>
+                  <button id="bookmark-add-button" class="secondary-button" type="button" disabled>Add</button>
+                </div>
+                <p id="bookmark-help" class="muted nav-help">Saves the selected cell (or the map center).</p>
+                <div id="bookmark-list" class="bookmark-list"></div>
+              </div>
+            </div>
+
+            <!-- Jump -->
+            <div class="tb-item">
+              <button class="tb-button" type="button" data-menu="menu-jump" aria-expanded="false">Jump</button>
+              <div id="menu-jump" class="tb-menu">
+                <p class="eyebrow">Jump</p>
+                <div class="jump-row">
+                  <label class="jump-field" for="jump-x-input">
+                    <span>X</span>
+                    <input id="jump-x-input" type="number" min="0" max="799" inputmode="numeric" placeholder="0" disabled>
+                  </label>
+                  <label class="jump-field" for="jump-y-input">
+                    <span>Y</span>
+                    <input id="jump-y-input" type="number" min="0" max="799" inputmode="numeric" placeholder="0" disabled>
+                  </label>
+                  <button id="jump-button" class="primary-button jump-button" type="button" disabled>Go</button>
+                </div>
+                <p id="jump-status" class="muted nav-help">Jump to any cell by coordinates.</p>
+                <button id="measure-button" class="secondary-button measure-button" type="button" disabled>Measure Distance</button>
+                <p id="measure-status" class="muted nav-help" hidden>Click two cells on the map.</p>
+              </div>
+            </div>
+
+            <!-- Search -->
+          <div class="tb-item map-search-panel" aria-label="Map search">
+            <button
+              id="search-toggle-button"
+              class="tb-button"
+              type="button"
+              aria-expanded="false"
+              title="Search explored bases by username"
+              disabled
+            >Search</button>
+            <div id="menu-search" class="tb-menu">
+              <div class="search-shell">
+                <input
+                  id="search-input"
+                  class="search-input"
+                  type="search"
+                  placeholder="Search by username"
+                  autocomplete="off"
+                  spellcheck="false"
+                  disabled
+                >
+                <div id="search-results" class="search-results" hidden></div>
+              </div>
+              <p id="search-status" class="search-status" hidden></p>
+            </div>
+          </div>
+          </div>
+
+          <div class="tb-group">
+            <!-- Alliance -->
+          <div class="tb-item" id="alliance-item" hidden>
+            <button class="tb-button" type="button" data-menu="menu-alliance" aria-expanded="false">Alliance<span id="alliance-badge" class="alliance-badge" hidden></span></button>
+            <div id="menu-alliance" class="tb-menu">
+              <p class="eyebrow">Alliance</p>
+              <div id="alliance-content" class="alliance-content">
+                <p class="muted">Sign in to use alliances.</p>
+              </div>
+            </div>
+          </div>
+
+            <!-- Watch -->
+          <div class="tb-item">
+            <button class="tb-button" type="button" data-menu="menu-watch" aria-expanded="false">Watch</button>
+            <div id="menu-watch" class="tb-menu">
+              <p class="eyebrow">Watchlist Activity</p>
+              <label class="watch-toggle">
+                <input id="watch-refresh-toggle" type="checkbox" checked disabled>
+                <span>Check your zones hourly</span>
+              </label>
+              <p class="muted nav-help">
+                Watches the zones around your own main yard and outposts. Cached data (from
+                other players' viewers) is checked every 10 minutes without touching the
+                game. A live check runs only once per hour, so the game still sees you as
+                offline and your main base stays attackable.
+              </p>
+              <div class="watch-group">
+                <p class="watch-heading watch-heading-yellow">Your bases</p>
+                <p class="watch-subheading">Recently captured</p>
+                <div id="watch-allies-captured" class="watch-list"></div>
+                <p class="watch-subheading">Recently lost</p>
+                <div id="watch-allies-lost" class="watch-list"></div>
+              </div>
+              <button id="watch-clear-button" class="secondary-button watch-clear" type="button" disabled>Clear Activity</button>
+            </div>
+          </div>
+          </div>
+
+          <div class="tb-group">
+            <!-- Filters (anchor class + behavior preserved) -->
+          <div class="tb-item map-filter-anchor" aria-label="Map filters">
+            <button
+              id="filter-toggle-button"
+              class="tb-button"
+              type="button"
+              aria-label="Show filters"
+              aria-expanded="false"
+              disabled
+            ><span id="filter-toggle-label">Filters</span></button>
+            <div id="filter-menu" class="filter-menu" hidden>
+              <div class="filter-menu-header">
+                <div>
+                  <p class="eyebrow">Filter</p>
+                  <h2>Base Filters</h2>
+                </div>
+                <button id="filter-clear-button" class="secondary-button" type="button">Clear</button>
+              </div>
+              <div class="filter-section">
+                <p class="filter-section-title">Player</p>
+                <div class="search-shell filter-player-shell">
+                  <input
+                    id="filter-player-input"
+                    class="search-input filter-player-input"
+                    type="search"
+                    placeholder="Filter by username"
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                  <div id="filter-player-results" class="search-results filter-player-results" hidden></div>
+                </div>
+                <p class="filter-help">Show a player&apos;s main yard and owned outposts.</p>
+              </div>
+              <div class="filter-section">
+                <p class="filter-section-title">Type</p>
+                <div id="filter-type-options" class="filter-options"></div>
+              </div>
+              <div class="filter-section">
+                <p class="filter-section-title">Tribe</p>
+                <div id="filter-tribe-options" class="filter-options"></div>
+              </div>
+              <div class="filter-section">
+                <p class="filter-section-title">Level</p>
+                <div id="filter-level-range" class="filter-level-range">
+                  <div class="filter-level-range-values">
+                    <span id="filter-level-min-label" class="filter-level-range-value">Min -</span>
+                    <span id="filter-level-max-label" class="filter-level-range-value">Max -</span>
+                  </div>
+                  <div class="filter-level-range-track">
+                    <div id="filter-level-range-fill" class="filter-level-range-fill"></div>
+                    <input id="filter-level-min-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="min">
+                    <input id="filter-level-max-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="max">
+                  </div>
+                </div>
+                <p id="filter-level-help" class="filter-help">No wild base levels available.</p>
+              </div>
+              <div class="filter-section">
+                <p class="filter-section-title">Inactivity</p>
+                <label class="filter-inactivity-toggle">
+                  <input id="filter-inactivity-enabled" type="checkbox">
+                  <span>Only players with no new outposts in</span>
+                </label>
+                <div class="filter-level-range">
+                  <div class="filter-level-range-values">
+                    <span id="filter-inactivity-label" class="filter-level-range-value">30+ days</span>
+                  </div>
+                  <div class="filter-level-range-track">
+                    <input id="filter-inactivity-days" class="filter-level-slider" type="range" min="30" max="365" step="5" value="30">
+                  </div>
+                </div>
+                <p class="filter-help">Based on outpost counts observed by this viewer; players first seen recently count as active.</p>
+              </div>
+              <div class="filter-section">
+                <p class="filter-section-title">Outposts</p>
+                <div id="filter-outpost-range" class="filter-level-range">
+                  <div class="filter-level-range-values">
+                    <span id="filter-outpost-label" class="filter-level-range-value">Min -</span>
+                    <span id="filter-outpost-max-label" class="filter-level-range-value">Max -</span>
+                  </div>
+                  <div class="filter-level-range-track">
+                    <div id="filter-outpost-range-fill" class="filter-level-range-fill"></div>
+                    <input id="filter-outpost-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="min">
+                    <input id="filter-outpost-max-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="max">
+                  </div>
+                </div>
+                <p id="filter-outpost-help" class="filter-help">No player outposts explored yet.</p>
+              </div>
+              <div class="filter-menu-footer">
+                <p id="filter-status" class="filter-match-count filter-status">Sign in to enable base filters.</p>
+                <p id="filter-match-count" class="filter-match-count">0 bases shown</p>
+              </div>
+            </div>
+          </div>
+
+            <!-- Worlds -->
+            <div class="tb-item">
+              <button class="tb-button" type="button" data-menu="menu-worlds" aria-expanded="false">Worlds</button>
+              <div id="menu-worlds" class="tb-menu">
+                <p class="eyebrow">Worlds</p>
+                <p class="notice">
+                  Your own world shows live data; any other world shows its shared cached snapshot.
+                </p>
+                <div id="world-list" class="world-list"></div>
+              </div>
+            </div>
+
+            <!-- Leaderboard -->
+            <div class="tb-item">
+              <button class="tb-button" type="button" data-menu="menu-leaderboard" aria-expanded="false">Leaderboard</button>
+              <div id="menu-leaderboard" class="tb-menu">
+                <p class="eyebrow">Leaderboard</p>
+                <h2 id="leaderboard-title">No world selected</h2>
+                <div id="leaderboard-list" class="leaderboard-list"></div>
+              </div>
+            </div>
+          </div>
+                  <!-- Admin tools: unhidden by JS after admin verification; being a
+               separate group draws the "|" separator before Loot. -->
+          <div class="tb-group" id="admin-tools-group" hidden>
+            <!-- Loot (administrators only; shown after admin verification) -->
+          <div class="tb-item" id="loot-item" hidden>
+            <button
+              class="tb-button"
+              type="button"
+              data-menu="menu-loot"
+              aria-expanded="false"
+              title="Show the loot stored in each base on the map (admins only)"
+            >Loot</button>
+            <div id="menu-loot" class="tb-menu">
+              <p class="eyebrow">Loot</p>
+              <label class="loot-check">
+                <input type="checkbox" id="loot-show-toggle">
+                <span>Show loot on map</span>
+              </label>
+              <p class="eyebrow loot-resource-eyebrow">Resource</p>
+              <div class="loot-resource-list" role="radiogroup" aria-label="Loot resource to display">
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="total" checked><span>Loot (total)</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r1"><span>Twigs</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r2"><span>Pebbles</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r3"><span>Putty</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r4"><span>Goo</span></label>
+              </div>
+            </div>
+          </div>
+
+            <!-- World scan (administrators only) -->
+          <div class="tb-item" id="scan-item" hidden>
+            <button class="tb-button" type="button" data-menu="menu-scan" aria-expanded="false">Scan</button>
+            <div id="menu-scan" class="tb-menu">
+              <p class="eyebrow">World Scan</p>
+              <p class="muted nav-help scan-intro">
+                Downloads every zone in the world (~6,400 requests, roughly 10 minutes) so search,
+                filters, and profiles cover everything. Zones fetched within the last hour are skipped.
+              </p>
+              <button id="scan-button" class="secondary-button" type="button" disabled>Scan World</button>
+              <div id="scan-progress" class="scan-progress" hidden>
+                <div id="scan-progress-fill" class="scan-progress-fill"></div>
+              </div>
+              <p id="scan-status" class="muted nav-help"></p>
+            </div>
+          </div>
+          </div>
+        </div>
+
+         <div class="toolbar-actions">
+          <!-- Account -->
+          <div class="tb-item tb-item-right session-panel">
+            <div id="session-signed-in" class="session-signed-in" hidden>
+              <div class="session-identity">
+                <span class="session-signed-label">Signed in as:</span>
+                <span id="session-name-display" class="session-name-display"></span>
+              </div>
+              <button id="logout-button" class="secondary-button" type="button">Log out</button>
+            </div>
+            <button id="account-button" class="tb-button tb-account-button" type="button" data-menu="menu-account" aria-expanded="false">
+              <span id="session-name">Sign in</span>
+            </button>
+            <div id="menu-account" class="tb-menu tb-menu-right">
+              <p class="eyebrow">Session</p>
+              <form id="login-form" class="login-form">
+                <label>
+                  <span>Email</span>
+                  <input id="email-input" name="email" type="email" autocomplete="username" required>
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input id="password-input" name="password" type="password" autocomplete="current-password" required>
+                </label>
+                <button id="login-button" class="primary-button" type="submit">Sign in</button>
+              </form>
+              <p id="session-status" class="muted">Sign in with your own BYM credentials.</p>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="corner-buttons">
+      <button id="settings-button" class="corner-button" type="button" title="Admin settings" hidden>&#9881;</button>
+      <button
+        id="refresh-button"
+        class="corner-button map-control-button"
+        type="button"
+        aria-label="Refresh world map"
+        title="Refresh the visible map area"
+        disabled
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5a7 7 0 1 1-6.65 9.18 1 1 0 1 1 1.9-.62A5 5 0 1 0 8 8.58V11a1 1 0 0 1-1.7.71l-3-3a1 1 0 0 1 0-1.42l3-3A1 1 0 0 1 8 5v1.46A6.96 6.96 0 0 1 12 5Z" />
+        </svg>
+        <span id="refresh-button-cooldown" class="map-control-cooldown" aria-hidden="true" hidden></span>
+      </button>
+      <button id="zoom-in-button" class="corner-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+      <button id="zoom-out-button" class="corner-button" type="button" aria-label="Zoom out" title="Zoom out">-</button>
+      <button id="help-button" class="corner-button" type="button" title="Help &amp; privacy">?</button>
+    </div>
+
+    <div id="help-panel" class="help-panel" hidden>
+      <div class="help-panel-inner">
+        <div class="help-panel-header">
+          <h2>Help &amp; Privacy</h2>
+          <button id="help-close" class="secondary-button" type="button">Close</button>
+        </div>
+        <div class="help-panel-body">
+          <h3>What this tool is</h3>
+          <p>A community world-map viewer for Backyard Monsters Refitted (Map Room 2).
+          Pan and zoom the map, search players, view profiles and leaderboards, share
+          coordinate links, and browse any world's cached snapshot as a guest.</p>
+
+          <h3>How it works</h3>
+          <p>Map data comes from the game once, then is cached and shared: when anyone's
+          viewer fetches a zone, everyone else sees it from the cache. Zones near your own
+          bases refresh often (every 5 minutes); distant wilderness refreshes at most daily.
+          A strict server-side budget caps total game-API traffic for all users combined, so
+          the viewer can never hammer the game servers &mdash; distant areas may show data
+          up to a day old, on purpose.</p>
+
+          <h3>What we do with your data</h3>
+          <p><b>Your password is never stored.</b> Sign-in passes your credentials directly
+          to the game and keeps only a session token, cached briefly in server memory for
+          verification. <b>Map data is public within this tool:</b> base names, positions,
+          levels, and main-yard avatars visible on the world map are cached and shown to all
+          users, including guests, along with when each area was last observed. Alliance
+          chat, targets, and feeds are stored on this viewer's server and visible to your
+          alliance. Sign-in times are logged for moderation.</p>
+
+          <h3>How to use it</h3>
+          <p>Drag to pan, scroll to zoom, click a base for details. The toolbar has search,
+          filters (including an inactivity filter), measurements, jump-to-coordinates,
+          watch notifications, alliances, and the world picker &mdash; use it to browse
+          other worlds from cache. Signed in, your own bases are always highlighted and
+          the map around them stays freshest.</p>
+
+          <h3>Want your base hidden from this viewer?</h3>
+          <p>If this tool is being used to target or harass you, request hiding below.
+          Approved players are camouflaged on the map and excluded from search, filters,
+          profiles, and watch activity for normal users.</p>
+          <div id="hide-request-area">
+            <p class="muted" id="hide-request-status">Sign in to request hiding for your account.</p>
+            <div id="hide-request-form" hidden>
+              <textarea id="hide-request-reason" rows="2" maxlength="300"
+                placeholder="Briefly, why do you want your bases hidden?"></textarea>
+              <button id="hide-request-submit" class="secondary-button" type="button">Request hiding</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="announcement-banner" class="announcement-banner" hidden>
+        <span id="announcement-text-view"></span>
+        <button id="announcement-dismiss" type="button" aria-label="Dismiss announcement">&times;</button>
+      </div>
+
+      <main class="map-shell">
+        <section id="map-panel" class="map-panel panel">
+          <canvas id="map-canvas"></canvas>
+          <aside id="details-panel" class="panel details-panel">
+            <div class="details-drag-handle" title="Drag to move this panel">
+              <span class="details-drag-grip" aria-hidden="true"></span>
+              <button type="button" id="details-reset" class="details-reset" title="Reset panel position">Reset</button>
+            </div>
+            <p class="eyebrow">Cell</p>
+            <h2 id="details-title">No selection</h2>
+            <div id="details-content" class="details-content">
+              Hover or select a visible MR2 cell to inspect it.
+            </div>
+          </aside>
+          <div id="map-coordinates" class="map-coordinates" hidden>Cell -, -</div>
+          <div id="map-overlay" class="map-overlay">
+            <div class="map-overlay-card">
+              <div class="map-overlay-message">Loading...</div>
+              <div class="map-overlay-progress" hidden>
+                <div class="map-overlay-progress-fill"></div>
+              </div>
+            </div>
+          </div>
+          <div id="mobile-details-sheet" class="panel mobile-details-sheet" aria-hidden="true">
+            <div class="mobile-details-sheet-header">
+              <div>
+                <p class="eyebrow">Cell</p>
+                <h2 id="mobile-details-title">No selection</h2>
+              </div>
+              <button
+                id="mobile-details-close-button"
+                class="icon-button mobile-details-close-button"
+                type="button"
+                aria-label="Close cell information"
+                title="Close cell information"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4 6.4 5Z" />
+                </svg>
+              </button>
+            </div>
+            <div id="mobile-details-content" class="details-content mobile-details-content">
+              Tap a visible MR2 cell to inspect it.
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      // Non-module watchdog: runs even when ES module loading fails, so
+      // failures surface in the console and on the page instead of a
+      // silent form-submit page reload.
+      window.__BYM_MR2_APP_LOADED = false;
+      console.info("[BYM-MR2] index.html parsed; waiting for app module (/app.js)...");
+
+      window.addEventListener("error", function (event) {
+        var target = event.target || {};
+        if (target.tagName === "SCRIPT" || target.tagName === "LINK" || target.tagName === "IMG") {
+          console.error("[BYM-MR2] Resource failed to load:", target.src || target.href);
+          return;
+        }
+        console.error("[BYM-MR2] Uncaught error:", event.message, "at", event.filename + ":" + event.lineno);
+      }, true);
+
+      window.addEventListener("unhandledrejection", function (event) {
+        console.error("[BYM-MR2] Unhandled promise rejection:", event.reason);
+      });
+
+      window.addEventListener("DOMContentLoaded", function () {
+        var form = document.getElementById("login-form");
+        if (form) {
+          form.addEventListener("submit", function (event) {
+            if (!window.__BYM_MR2_APP_LOADED) {
+              event.preventDefault();
+              var message = "The app module never loaded, so sign-in cannot run. See the browser console (F12) for the reason.";
+              console.error("[BYM-MR2] " + message);
+              var status = document.getElementById("session-status");
+              if (status) { status.textContent = message; }
+            }
+          });
+        }
+
+        window.setTimeout(function () {
+          if (window.__BYM_MR2_APP_LOADED) { return; }
+          var message =
+            "App module (/app.js) failed to load after 3s. Most common cause: the web server " +
+            "served JavaScript with MIME type text/plain instead of text/javascript " +
+            "(browsers reject module scripts with wrong MIME types). Use the bundled " +
+            "dev_server.py, which forces text/javascript, and check the Network tab " +
+            "for the Content-Type of /app.js.";
+          console.error("[BYM-MR2] " + message);
+          var status = document.getElementById("session-status");
+          if (status) { status.textContent = message; }
+        }, 3000);
+      });
+    </script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

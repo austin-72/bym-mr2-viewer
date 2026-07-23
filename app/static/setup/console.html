@@ -1,0 +1,185 @@
+      <div id="console">
+        <section>
+          <h2>Hidden Players</h2>
+          <p class="muted">
+            Players on this list are hidden from the map for normal users: their bases are not
+            drawn and they are excluded from search, filters, profiles, watch activity, and the
+            shared map cache. Administrators still see them. Use this to stop targeted
+            harassment of specific players.
+          </p>
+          <div class="row" style="margin: 10px 0;">
+            <input id="hide-name" placeholder="Player name" autocomplete="off">
+            <input id="hide-reason" placeholder="Reason (optional, visible to admins)" style="flex: 1; min-width: 200px;">
+            <button id="hide-add">Hide player</button>
+          </div>
+          <p id="hidden-status" class="status"></p>
+          <table>
+            <thead><tr><th>Player</th><th>Reason</th><th>Hidden by</th><th>When</th><th></th></tr></thead>
+            <tbody id="hidden-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Hiding Requests</h2>
+          <p class="muted">
+            Players asking to have their bases hidden from the viewer. Approving adds them
+            to the Hidden Players list with their stated reason; denying lets them submit
+            a new request later.
+          </p>
+          <p id="hide-req-status" class="status"></p>
+          <table>
+            <thead><tr><th>Player</th><th>Reason</th><th>When</th><th>Status</th><th></th></tr></thead>
+            <tbody id="hide-req-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>API Budget, Limits &amp; Stats</h2>
+          <p class="muted">
+            <strong>Game API budget:</strong> outbound calls per minute to the BYM servers,
+            priority-scheduled (1 lowest, 10 highest; strict - low priorities wait while high
+            ones stream). The global limit covers all users combined; the per-user limit stops
+            one person's browsing from eating the whole budget without blocking anyone else.
+            Queue depth bounds how many requests may wait for budget (beyond it they are
+            rejected instantly with a retry hint); max wait is how long a queued request may
+            park before giving up. Raise the global limit temporarily before a world scan.
+          </p>
+          <div class="row" style="margin: 8px 0; align-items: center;">
+            <span class="muted" style="min-width: 120px;">Game API budget</span>
+            <label>Global/min <input id="set-maxApiPerMinute" type="number" style="width: 70px;"></label>
+            <label>Per user/min <input id="set-maxApiPerMinutePerUser" type="number" style="width: 70px;"></label>
+            <label>Queue depth <input id="set-bymMaxQueueDepth" type="number" style="width: 70px;"></label>
+            <label>Queue/user <input id="set-bymMaxQueueDepthPerUser" type="number" style="width: 70px;"></label>
+            <label>Max wait (s) <input id="set-bymMaxWaitSeconds" type="number" style="width: 70px;"></label>
+          </div>
+          <p class="muted">
+            <strong>Viewer endpoints:</strong> this server's own request limits (map reads,
+            alliances, everything except the game-API budget above). Sustained per minute plus
+            a burst allowance, per signed-in user or per anonymous IP.
+          </p>
+          <div class="row" style="margin: 8px 0; align-items: center;">
+            <span class="muted" style="min-width: 120px;">Viewer endpoints</span>
+            <label>User/min <input id="set-viewerUserPerMin" type="number" style="width: 70px;"></label>
+            <label>User burst <input id="set-viewerUserBurst" type="number" style="width: 70px;"></label>
+            <label>Anon/min <input id="set-viewerIpPerMin" type="number" style="width: 70px;"></label>
+            <label>Anon burst <input id="set-viewerIpBurst" type="number" style="width: 70px;"></label>
+            <label>/log per min <input id="set-viewerLogPerMin" type="number" style="width: 70px;"></label>
+          </div>
+          <p class="muted">
+            <strong>Client pacing:</strong> pushed to every browser at sign-in. Zone pace is
+            each client's self-imposed zone fetches per minute (0 = follow the per-user API
+            limit); concurrency is parallel zone fetches per client (0 = client default, 4).
+            The server enforces the real ceilings regardless.
+          </p>
+          <div class="row" style="margin: 8px 0; align-items: center;">
+            <span class="muted" style="min-width: 120px;">Client pacing</span>
+            <label>Zone pace/min <input id="set-clientZonePace" type="number" style="width: 70px;"></label>
+            <label>Concurrency <input id="set-clientZoneConcurrency" type="number" style="width: 70px;"></label>
+          </div>
+          <div class="row" style="margin: 10px 0;">
+            <button id="rate-save">Save all limits</button>
+            <span id="rate-status" class="status"></span>
+          </div>
+
+          <h2 style="font-size: 15px; margin-top: 18px;">Live usage (refreshes every 5s)</h2>
+          <p id="rate-stats" class="muted"></p>
+          <div id="rate-spark" title="Outbound BYM API calls per minute, last 60 minutes"></div>
+          <p id="rate-queue" class="muted"></p>
+          <p id="rate-health" class="muted"></p>
+          <p id="rate-breakdown" class="muted"></p>
+          <table>
+            <thead><tr><th>Caller</th><th>Last minute</th><th>Last hour</th></tr></thead>
+            <tbody id="rate-user-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Sign-in Whitelist</h2>
+          <p class="muted">
+            While enabled, only the players listed below may sign in to this viewer.
+            Everyone else is refused a session with a polite message; their game account is
+            not affected in any way. Guests can still browse the cached map as normal, and
+            <strong>administrators are always allowed</strong> so you can never lock yourself
+            out of this console. Players who signed in before you enabled the list lose their
+            session as soon as it refreshes.
+          </p>
+          <div class="row" style="margin: 10px 0; align-items: center;">
+            <label><input id="whitelist-enabled" type="checkbox"> Whitelist enabled</label>
+            <span id="whitelist-state" class="muted"></span>
+          </div>
+          <div class="row" style="margin: 10px 0;">
+            <input id="whitelist-name" placeholder="Game username" autocomplete="off">
+            <button id="whitelist-add">Allow player</button>
+          </div>
+          <p id="whitelist-status" class="status"></p>
+          <table>
+            <thead><tr><th>Allowed player</th><th></th></tr></thead>
+            <tbody id="whitelist-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Alliances</h2>
+          <p class="muted">
+            Every alliance on this viewer. Deleting removes the alliance, its ranks, chat,
+            targets, and feed; members simply become alliance-less. Setting a new leader
+            demotes the old one to officer.
+          </p>
+          <p id="alliance-status" class="status"></p>
+          <table>
+            <thead><tr><th>Alliance</th><th>Leader</th><th>Members</th><th>Invites</th><th>Data</th><th></th></tr></thead>
+            <tbody id="alliance-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Administrators</h2>
+          <p class="muted">
+            Users who can open this console. Identity is the game username the
+            BYM server reports (case-insensitive), verified via a real session
+            token. You cannot remove the last administrator.
+          </p>
+          <div class="row" style="margin: 10px 0;">
+            <input id="admin-name" placeholder="Game username" autocomplete="off">
+            <button id="admin-add">Add admin</button>
+          </div>
+          <p id="admin-status" class="status"></p>
+          <table>
+            <thead><tr><th>Administrator</th><th></th></tr></thead>
+            <tbody id="admin-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Announcement</h2>
+          <p class="muted">Shown as a banner to everyone using the viewer. Leave empty and save to clear it.</p>
+          <textarea id="announcement-text" rows="2" maxlength="500"></textarea>
+          <div class="row" style="margin-top: 8px;">
+            <button id="announcement-save">Save announcement</button>
+            <span id="announcement-status" class="status"></span>
+          </div>
+        </section>
+
+        <section>
+          <h2>Shared Map Cache</h2>
+          <p class="muted">Per-world cache on this viewer server. Purging stale zones forces fresh fetches.</p>
+          <table>
+            <thead><tr><th>World</th><th>Zones</th><th>Size</th><th>Newest</th><th></th></tr></thead>
+            <tbody id="world-rows"></tbody>
+          </table>
+          <p id="cache-status" class="status"></p>
+        </section>
+
+        <section>
+          <h2>Viewer Users</h2>
+          <table>
+            <thead><tr><th>User</th><th>Sign-ins</th><th>Last sign-in (UTC)</th></tr></thead>
+            <tbody id="user-rows"></tbody>
+          </table>
+        </section>
+
+        <section>
+          <h2>Audit Log</h2>
+          <div id="audit-rows" class="muted"></div>
+        </section>
+      </div>
