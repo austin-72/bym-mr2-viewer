@@ -164,6 +164,7 @@ export class ViewerApp {
       mobileDetailsTitle: document.getElementById("mobile-details-title"),
       mobileDetailsContent: document.getElementById("mobile-details-content"),
       mobileDetailsCloseButton: document.getElementById("mobile-details-close-button"),
+      detailsCloseButton: document.getElementById("details-close-button"),
       mapCanvas: document.getElementById("map-canvas"),
       mapCoordinates: document.getElementById("map-coordinates"),
       mapOverlay: document.getElementById("map-overlay"),
@@ -245,88 +246,8 @@ export class ViewerApp {
   }
 
   // ------------------------------------------------------------------
-  // Draggable cell panel: the handle switches the panel from its docked
-  // top/right anchor to explicit left/top pixels, clamped to the map area
-  // so it can never be dragged out of reach. Pointer events cover mouse,
-  // touch and pen with one code path.
   // ------------------------------------------------------------------
-  setupDetailsPanelDrag() {
-    const panel = document.getElementById("details-panel");
-    const handle = panel?.querySelector(".details-drag-handle");
-    const resetButton = document.getElementById("details-reset");
-    if (!panel || !handle) return;
-
-    let dragging = false;
-    let pointerId = null;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    const bounds = () => panel.parentElement?.getBoundingClientRect()
-      || document.body.getBoundingClientRect();
-
-    const place = (left, top) => {
-      const area = bounds();
-      const maxLeft = Math.max(0, area.width - panel.offsetWidth);
-      const maxTop = Math.max(0, area.height - panel.offsetHeight);
-      panel.style.left = `${Math.min(Math.max(0, left), maxLeft)}px`;
-      panel.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
-      panel.style.right = "auto";
-      panel.style.bottom = "auto";
-      panel.classList.add("moved");
-    };
-
-    handle.addEventListener("pointerdown", (event) => {
-      if (event.button !== undefined && event.button !== 0) return;
-      if (event.target.closest(".details-reset")) return;
-      const area = bounds();
-      const rect = panel.getBoundingClientRect();
-      // Freeze the current on-screen position before switching anchors, so
-      // the panel does not jump on the first drag.
-      place(rect.left - area.left, rect.top - area.top);
-      dragging = true;
-      pointerId = event.pointerId;
-      offsetX = event.clientX - rect.left;
-      offsetY = event.clientY - rect.top;
-      panel.classList.add("dragging");
-      handle.setPointerCapture?.(event.pointerId);
-      event.preventDefault();
-    });
-
-    handle.addEventListener("pointermove", (event) => {
-      if (!dragging || event.pointerId !== pointerId) return;
-      const area = bounds();
-      place(event.clientX - area.left - offsetX, event.clientY - area.top - offsetY);
-      event.preventDefault();
-    });
-
-    const endDrag = (event) => {
-      if (!dragging || (event && event.pointerId !== pointerId)) return;
-      dragging = false;
-      pointerId = null;
-      panel.classList.remove("dragging");
-    };
-    handle.addEventListener("pointerup", endDrag);
-    handle.addEventListener("pointercancel", endDrag);
-
-    resetButton?.addEventListener("click", () => {
-      panel.style.left = "";
-      panel.style.top = "";
-      panel.style.right = "";
-      panel.style.bottom = "";
-      panel.classList.remove("moved");
-    });
-
-    // Keep a moved panel inside the map when the window is resized.
-    window.addEventListener("resize", () => {
-      if (!panel.classList.contains("moved")) return;
-      const area = bounds();
-      const rect = panel.getBoundingClientRect();
-      place(rect.left - area.left, rect.top - area.top);
-    });
-  }
-
   async start() {
-    this.setupDetailsPanelDrag();
     try {
       const params = new URLSearchParams(window.location.search);
       const urlX = Number.parseInt(params.get("x") ?? "", 10);
@@ -357,6 +278,7 @@ export class ViewerApp {
     this.elements.zoomInButton.addEventListener("click", () => this.renderer.zoomBy(1.18, true));
     this.elements.zoomOutButton.addEventListener("click", () => this.renderer.zoomBy(1 / 1.18, true));
     this.elements.mobileDetailsCloseButton.addEventListener("click", () => this.handleMobileDetailsClose());
+    this.elements.detailsCloseButton?.addEventListener("click", () => this.closeCellDetails());
     this.elements.jumpButton.addEventListener("click", () => this.handleJump());
     const jumpOnEnter = (event) => {
       if (event.key === "Enter") {
@@ -1117,10 +1039,10 @@ export class ViewerApp {
   }
 
   handleHoveredCell(cell) {
+    // Hover no longer drives the cell popup - it opens on selection only - so
+    // there is nothing to re-render here. The value is still tracked because
+    // the map's own hover highlight and the coordinate readout use it.
     this.hoveredCell = cell;
-    if (!this.selectedCell) {
-      this.renderDetails();
-    }
   }
 
   handleSelectedCell(cell) {
@@ -1150,8 +1072,8 @@ export class ViewerApp {
       this.renderDetailsPanel({
         titleEl: this.elements.detailsTitle,
         contentEl: this.elements.detailsContent,
-        cell: this.selectedCell || this.hoveredCell || null,
-        emptyMessage: "Hover or select a visible MR2 cell to inspect it.",
+        cell: this.selectedCell || null,
+        emptyMessage: "Select a visible MR2 cell to inspect it.",
       });
       this.renderDetailsPanel({
         titleEl: this.elements.mobileDetailsTitle,
@@ -1160,6 +1082,10 @@ export class ViewerApp {
         emptyMessage: "Tap a visible MR2 cell to inspect it.",
       });
     }
+    // The panel is a popup, not a permanent fixture: it stays closed until a
+    // cell is actually selected, and the close button dismisses it. Hovering
+    // no longer opens it, so it cannot follow the cursor around the map.
+    this.syncDesktopDetailsState();
     this.animateDesktopDetailsResize(previousDesktopDetailsHeight, shouldAnimateDesktopResize);
     this.syncMobileDetailsState();
     this.animateMobileDetailsResize(previousMobileDetailsHeight, shouldAnimateMobileResize);
@@ -1186,24 +1112,25 @@ export class ViewerApp {
 
     titleEl.textContent = cell.n || `${cell.x}, ${cell.y}`;
 
-    for (const [label, value] of this.buildDetailRows(cell)) {
-      const row = document.createElement("div");
-      row.className = "detail-row";
-      row.innerHTML = `<span class="detail-label">${escapeHtml(label)}</span><span>${escapeHtml(value)}</span>`;
-      contentEl.appendChild(row);
+    const baseType = Number(cell.b);
+    const isMainYard = baseType === MR2.yardTypes.main;
+    const isOutpostCell = baseType === MR2.yardTypes.outpost;
+
+    if (isMainYard || isOutpostCell) {
+      this.renderOwnedCellSummary(contentEl, cell, isMainYard);
+    } else {
+      for (const [label, value] of this.buildDetailRows(cell)) {
+        const row = document.createElement("div");
+        row.className = "detail-row";
+        row.innerHTML = `<span class="detail-label">${escapeHtml(label)}</span><span>${escapeHtml(value)}</span>`;
+        contentEl.appendChild(row);
+      }
     }
 
     const actions = document.createElement("div");
     actions.className = "detail-actions";
 
     if (Number(cell.uid || 0) > 0) {
-      const profileButton = document.createElement("button");
-      profileButton.type = "button";
-      profileButton.className = "secondary-button";
-      profileButton.textContent = "View Player Profile";
-      profileButton.addEventListener("click", () => this.openPlayerProfile(Number(cell.uid)));
-      actions.appendChild(profileButton);
-
       // Base viewer: read-only popup rendered with the real game sprites.
       // Clicking reloads the cell's zone from the game server first, so the
       // base id and ownership are current, then loads and renders the base.
@@ -1216,8 +1143,15 @@ export class ViewerApp {
         viewBaseButton.textContent = isMain ? "View Yard" : "View Outpost";
         const token = this.session?.token || "";
         if (!token) {
-          viewBaseButton.disabled = true;
+          // Signed-out visitors get the sign-in form rather than a dead
+          // control: the base viewer needs a session, and hiding that behind
+          // a disabled button gives them nothing to act on.
           viewBaseButton.title = "Sign in to view bases";
+          viewBaseButton.addEventListener("click", () => {
+            this.openToolbarMenu("menu-account");
+            this.elements.emailInput?.focus();
+            this.setSessionStatus?.(`Sign in to view ${cell.n ? `${cell.n}'s ` : ""}${isMain ? "yard" : "outpost"}.`);
+          });
         } else {
           viewBaseButton.addEventListener("click", () => {
             const cellX = Number(cell.x);
@@ -1228,8 +1162,10 @@ export class ViewerApp {
               token: this.session?.token || token,
               recoverToken: () => this.recoverSessionToken(),
               userid: this.session?.user?.userid ?? 0,
-              title: cell.n ? `${cell.n}'s ${isMain ? "Yard" : "Outpost"}` : "",
+              name: String(cell.n || "").trim(),
               isMain,
+              x: cellX,
+              y: cellY,
               prepare: async (setStatus) => {
                 const zone = {
                   x: Math.floor(cellX / MR2.zoneSize) * MR2.zoneSize,
@@ -1277,6 +1213,135 @@ export class ViewerApp {
     actions.appendChild(linkButton);
 
     contentEl.appendChild(actions);
+  }
+
+  // ------------------------------------------------------------------
+  // Player-owned cell summary (main yards and outposts).
+  //
+  // Layout, top to bottom: avatar, "Name (level) - Alliance", what and where,
+  // outpost count, main-yard link for outposts, then a rule, then the scouting
+  // block (kit, freshness, damage, flinger), then an admin-only loot block.
+  // Buttons are appended by the caller.
+  // ------------------------------------------------------------------
+  renderOwnedCellSummary(contentEl, cell, isMain) {
+    const name = String(cell.n || "").trim();
+    const ownerId = Number(cell.uid || 0);
+
+    // Avatar: the game's own picture from the cached main-base cell, falling
+    // back through the profile store to the game placeholder, exactly as the
+    // profile panel resolves it.
+    const profile = ownerId > 0 ? this.renderer?.getPlayerProfile(ownerId) : null;
+    const photo = document.createElement("img");
+    photo.className = "cell-owner-photo";
+    photo.alt = name ? `${name}'s avatar` : "Owner avatar";
+    const placeholder = `${this.config?.cdnBaseUrl || ""}/assets/bym-refitted-assets/placeholder.jpg`;
+    const nameLower = name.toLocaleLowerCase();
+    const ownName = String(this.session?.user?.username || "").trim().toLocaleLowerCase();
+    const picture = this.getCellAvatarUrl(cell)
+      || this.getCellAvatarUrl(profile?.main)
+      || (profile?.cells || []).map((entry) => this.getCellAvatarUrl(entry)).find(Boolean)
+      || "";
+    if (picture) {
+      photo.src = picture;
+    } else if (ownName && nameLower === ownName && this.session?.user?.pic_square) {
+      photo.src = this.session.user.pic_square;
+    } else if (this.profilePicCache.has(nameLower)) {
+      photo.src = this.profilePicCache.get(nameLower) || placeholder;
+    } else {
+      photo.src = placeholder;
+      if (name) {
+        fetchPublicProfile(name)
+          .then((payload) => {
+            const pic = String(payload?.pic || "").trim();
+            this.profilePicCache.set(nameLower, pic);
+            if (pic && photo.isConnected) photo.src = pic;
+          })
+          .catch(() => this.profilePicCache.set(nameLower, ""));
+      }
+    }
+    photo.addEventListener("error", () => {
+      if (photo.src !== placeholder) photo.src = placeholder;
+    });
+    contentEl.appendChild(photo);
+
+    // Owner line: the player's level comes from their main yard, so an
+    // outpost shows the owner's level rather than the outpost's own.
+    const mainCell = profile?.main || (isMain ? cell : null);
+    const playerLevel = Number((mainCell || cell).l || 0);
+    const allianceName = this.getPlayerAllianceName(name);
+    const ownerLine = document.createElement("p");
+    ownerLine.className = "cell-owner-line";
+    ownerLine.textContent = `${name || `Player ${ownerId}`} (${formatNumber(playerLevel)})`
+      + (allianceName ? ` - ${allianceName}` : "");
+    contentEl.appendChild(ownerLine);
+
+    const addLine = (text, className = "cell-line") => {
+      const line = document.createElement("p");
+      line.className = className;
+      line.textContent = text;
+      contentEl.appendChild(line);
+      return line;
+    };
+    const addRule = () => {
+      const rule = document.createElement("div");
+      rule.className = "cell-rule";
+      contentEl.appendChild(rule);
+    };
+
+    addLine(`${isMain ? "Main Yard" : "Outpost"} at ${cell.x},${cell.y}`);
+
+    const counts = ownerId > 0
+      ? (this.renderer?.getOwnedBaseCounts(ownerId) || { outpost: 0 })
+      : { outpost: 0 };
+    addLine(`Total Outposts: ${formatNumber(counts.outpost)}`);
+
+    // Outposts point back to their owner's main yard, with the same Jump
+    // control the alliance roster uses, so the affordance is identical
+    // wherever a jump is offered.
+    if (!isMain && mainCell) {
+      const line = document.createElement("p");
+      line.className = "cell-line cell-line-jump";
+      line.append(`Main Yard at ${mainCell.x},${mainCell.y} `);
+      // jumpToCoordinates centres the map, drops the jump marker, and selects
+      // the cell (firing onSelectCell), so the panel refreshes on its own.
+      line.appendChild(this.buildAllianceButton(
+        "Jump",
+        `Jump to ${name || "this player"}'s main yard`,
+        () => this.renderer?.jumpToCoordinates(Number(mainCell.x), Number(mainCell.y)),
+      ));
+      contentEl.appendChild(line);
+    }
+
+    addRule();
+
+    if (!isMain) {
+      // getarea reports v per cell from that cell's own save, so cell.v is
+      // this outpost's empire value. The profile's empireValue is the MAX
+      // across the owner's cells - almost always their main yard - which
+      // would classify every outpost of a large player as Ultra.
+      addLine(`Kit: ${this.describeOutpostKit(Number(cell.v || 0))}`);
+    }
+
+    const observedAt = this.getCellObservedAt(cell);
+    addLine(`Cell last updated: ${observedAt > 0 ? formatRelativeTime(observedAt) : "unknown"}`);
+    addLine(`Damage: ${formatNumber(Number(cell.dm || 0))}%`);
+
+    const flingerLevel = Number(cell.f || 0);
+    const flingerRange = getFlingerRange(cell.f, isMain);
+    addLine(`Flinger Range: ${formatNumber(flingerRange)} cells (level ${formatNumber(flingerLevel)})`);
+
+    // Loot is raid intel, so it stays administrator-only - but within that,
+    // every resource is listed even at zero so the absence of loot is itself
+    // readable rather than ambiguous.
+    if (this.isViewerAdmin) {
+      addRule();
+      addLine(`Loot: ${formatNumber(getCellLootTotal(cell))}`);
+      for (const [key, label] of [["r1", "Twigs"], ["r2", "Pebbles"], ["r3", "Putty"], ["r4", "Goo"]]) {
+        addLine(`${label}: ${formatNumber(Number(cell.r?.[key] || 0))}`);
+      }
+    }
+
+    addRule();
   }
 
   openPlayerProfile(ownerId) {
@@ -1502,6 +1567,51 @@ export class ViewerApp {
         button.textContent = original;
       }, 1800);
     }
+  }
+
+  // Outpost kit tier, inferred from empire value.
+  //
+  // Kits are prefab layouts bought from the game's outpost kit popup, and
+  // nothing in the map or base data records which one an outpost has: the
+  // "prefab" field is the building's LEVEL, and it is only written while the
+  // kit is still under construction. So the tier has to be inferred, and the
+  // only usable signal is empire value.
+  //
+  // The figures below are each kit's own empire value, computed by running
+  // the game's CalcBaseValue over the kit layouts extracted from the client
+  //   value = ceil(0.1 * sum(build time + r1 + r2 + r3 + r4)) per building,
+  //   skipping decoration/enemy/immovable/trap classes
+  // giving Regular 3,210,880 | Mega 15,930,337 | Ultra 42,686,223. Each
+  // threshold sits 25% under its kit, so a partly demolished or damaged
+  // outpost still reads as the kit it was built from. The tiers are ~5x and
+  // ~2.7x apart, so even at 25% no kit can reach the band above it.
+  //
+  // A kit's value is a FLOOR - owners upgrade past it - so this reads as
+  // "this kit or better". An outpost hand-built to these values reports a
+  // kit it never had; that misread is accepted.
+  describeOutpostKit(empireValue) {
+    const value = Number(empireValue || 0);
+    if (value >= 32_014_667) return "Ultra";
+    if (value >= 11_947_752) return "Mega";
+    if (value >= 2_408_160) return "Regular";
+    return "None";
+  }
+
+  // Newest observation covering this cell's zone, used for the "last updated"
+  // line. Zones are keyed by their origin in loadedZones.
+  getCellObservedAt(cell) {
+    const zoneX = Math.floor(Number(cell.x) / MR2.zoneSize) * MR2.zoneSize;
+    const zoneY = Math.floor(Number(cell.y) / MR2.zoneSize) * MR2.zoneSize;
+    return Number(this.renderer?.loadedZones?.get(`${zoneX},${zoneY}`) || 0);
+  }
+
+  // Alliance name for a player, when they are in the viewer's alliance. Only
+  // our own alliance's membership is known to the client, so anyone else
+  // returns "" and the line is omitted rather than showing a wrong answer.
+  getPlayerAllianceName(playerName) {
+    const name = String(playerName || "").trim();
+    if (!name || !this.alliance) return "";
+    return this.allianceMemberNames?.has(name) ? String(this.alliance.name || "").trim() : "";
   }
 
   buildDetailRows(cell) {
@@ -3458,6 +3568,31 @@ export class ViewerApp {
       this.elements.detailsPanel.style.height = "";
     }
     this.renderer?.render();
+  }
+
+  syncDesktopDetailsState() {
+    const panel = this.elements.detailsPanel;
+    if (!panel) return;
+    // Open when there is something to show: a selected cell, or a profile
+    // opened from elsewhere in the app.
+    const isOpen = Boolean(this.selectedCell) || Boolean(this.profileOwnerId);
+    panel.classList.toggle("open", isOpen);
+    panel.setAttribute("aria-hidden", String(!isOpen));
+  }
+
+  // Dismisses the cell popup on both layouts. clearSelection() drops the
+  // renderer's selection and hover, fires onSelectCell(null) which re-renders
+  // the panel, and repaints the map - so clicking the same cell again
+  // re-opens it rather than the click being swallowed.
+  closeCellDetails() {
+    this.profileOwnerId = null;
+    if (this.renderer) {
+      this.renderer.clearSelection();
+      return;
+    }
+    this.selectedCell = null;
+    this.hoveredCell = null;
+    this.renderDetails();
   }
 
   syncMobileDetailsState() {

@@ -412,12 +412,14 @@
         <section id="map-panel" class="map-panel panel">
           <canvas id="map-canvas"></canvas>
           <aside id="details-panel" class="panel details-panel">
-            <div class="details-drag-handle" title="Drag to move this panel">
-              <span class="details-drag-grip" aria-hidden="true"></span>
-              <button type="button" id="details-reset" class="details-reset" title="Reset panel position">Reset</button>
-            </div>
-            <p class="eyebrow">Cell</p>
-            <h2 id="details-title">No selection</h2>
+            <button
+              type="button"
+              id="details-close-button"
+              class="popup-close details-close-button"
+              aria-label="Close cell information"
+              title="Close"
+            >&times;</button>
+            <h2 id="details-title" class="visually-hidden">No selection</h2>
             <div id="details-content" class="details-content">
               Hover or select a visible MR2 cell to inspect it.
             </div>
@@ -434,20 +436,15 @@
           <div id="mobile-details-sheet" class="panel mobile-details-sheet" aria-hidden="true">
             <div class="mobile-details-sheet-header">
               <div>
-                <p class="eyebrow">Cell</p>
-                <h2 id="mobile-details-title">No selection</h2>
+                <h2 id="mobile-details-title" class="visually-hidden">No selection</h2>
               </div>
               <button
                 id="mobile-details-close-button"
-                class="icon-button mobile-details-close-button"
+                class="popup-close mobile-details-close-button"
                 type="button"
                 aria-label="Close cell information"
-                title="Close cell information"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4 6.4 5Z" />
-                </svg>
-              </button>
+                title="Close"
+              >&times;</button>
             </div>
             <div id="mobile-details-content" class="details-content mobile-details-content">
               Tap a visible MR2 cell to inspect it.

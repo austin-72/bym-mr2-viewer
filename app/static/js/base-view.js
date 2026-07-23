@@ -212,8 +212,10 @@ async function fetchBase(token, baseid, userid, recoverToken = null) {
 
 const ANIMATIONS_PREF_KEY = "bymViewerBaseAnimations";
 const LAYOUT_PREF_KEY = "bymViewerBaseLayout";
-const MIN_WINDOW_WIDTH = 360;
-const MIN_WINDOW_HEIGHT = 260;
+// Small enough to fit a narrow phone in portrait (360 would overflow a
+// 320px-wide device and force the window off-screen).
+const MIN_WINDOW_WIDTH = 280;
+const MIN_WINDOW_HEIGHT = 220;
 
 function loadLayoutPref() {
   try {
@@ -246,7 +248,13 @@ function clearLayoutPref() {
 }
 
 /** Default geometry: 90% of the viewport, centred. */
+/** Default geometry: 90% of the viewport, centred. Touch devices get the
+ *  whole screen, since a floating window is unusable at phone widths. */
 function defaultLayout() {
+  const touch = window.matchMedia?.("(max-width: 860px), (pointer: coarse)")?.matches;
+  if (touch) {
+    return { width: window.innerWidth, height: window.innerHeight, left: 0, top: 0 };
+  }
   const width = Math.max(MIN_WINDOW_WIDTH, Math.round(window.innerWidth * 0.9));
   const height = Math.max(MIN_WINDOW_HEIGHT, Math.round(window.innerHeight * 0.9));
   return {
@@ -276,12 +284,22 @@ function clampLayout(layout) {
  * own, so nothing here has to poke the renderer.
  */
 function setupWindowLayout(windowEl, resetButton) {
+  // Treat "close enough" as default: clamping and rounding can shift a
+  // restored layout by a pixel, and a 1px drift should not make the reset
+  // control appear.
+  const isDefaultLayout = (layout) => {
+    const base = clampLayout(defaultLayout());
+    return ["width", "height", "left", "top"]
+      .every((key) => Math.abs(Number(layout[key]) - Number(base[key])) <= 2);
+  };
+
   const apply = (layout, { persist = true } = {}) => {
     const next = clampLayout(layout);
     windowEl.style.width = `${next.width}px`;
     windowEl.style.height = `${next.height}px`;
     windowEl.style.left = `${next.left}px`;
     windowEl.style.top = `${next.top}px`;
+    windowEl.classList.toggle("resized", !isDefaultLayout(next));
     if (persist) saveLayoutPref(next);
     return next;
   };
@@ -397,20 +415,68 @@ export function closeBaseView() {
   backdrop.remove();
 }
 
-export async function openBaseView({ token, baseid, userid, title, isMain, prepare, recoverToken }) {
-  closeBaseView();
+/** "Name's Outpost at 400,370" - falls back gracefully as parts go missing. */
+function buildBaseTitle(name, isMain, x, y) {
+  const kind = isMain ? "Yard" : "Outpost";
+  const where = Number.isFinite(Number(x)) && Number.isFinite(Number(y))
+    ? ` at ${Number(x)},${Number(y)}`
+    : "";
+  const owner = String(name || "").trim();
+  return owner ? `${owner}'s ${kind}${where}` : `${kind}${where}`;
+}
+
+export async function openBaseView({ token, baseid, userid, name, isMain, x, y, prepare, recoverToken }) {
+  // Opening a second base while one is already showing updates the existing
+  // window in place: the user keeps the size and position they chose, and
+  // there is no close/reopen flicker. Each open bumps a generation counter so
+  // an in-flight load for the previous base knows it has been superseded and
+  // bails out instead of rendering into the window.
+  if (activeView) {
+    const generation = activeView.generation + 1;
+    activeView.generation = generation;
+    activeView.renderer?.destroy?.();
+    activeView.renderer = null;
+    const view = activeView;
+    const shell = view.backdrop.querySelector(".base-view-canvas-shell");
+    const titleEl = view.backdrop.querySelector(".base-view-title");
+    if (titleEl) titleEl.textContent = buildBaseTitle(name, isMain, x, y);
+    // Replace the canvas outright: the old renderer's observers and cached
+    // context are gone with it, so nothing from the previous base lingers.
+    const staleCanvas = shell?.querySelector(".base-view-canvas");
+    const freshCanvas = document.createElement("canvas");
+    freshCanvas.className = "base-view-canvas";
+    staleCanvas?.replaceWith(freshCanvas);
+    let status = shell?.querySelector(".base-view-status");
+    if (!status) {
+      status = document.createElement("div");
+      status.className = "base-view-status";
+      shell?.appendChild(status);
+    }
+    status.classList.remove("error");
+    status.textContent = "Loading base\u2026";
+    await loadBaseIntoView({
+      view, generation, backdrop: view.backdrop, status, canvas: freshCanvas,
+      token, baseid, userid, name, isMain, x, y, prepare, recoverToken,
+    });
+    return;
+  }
 
   const backdrop = document.createElement("div");
   backdrop.className = "base-view-backdrop";
   backdrop.innerHTML = `
     <div class="base-view-window" role="dialog" aria-modal="true" aria-label="Base viewer">
       <div class="base-view-header">
-        <span class="base-view-title">${escapeHtml(title || (isMain ? "Yard" : "Outpost"))}</span>
+        <span class="base-view-title">${escapeHtml(buildBaseTitle(name, isMain, x, y))}</span>
         <div class="base-view-header-buttons">
           <button type="button" class="base-view-anim-toggle" aria-pressed="true"
             title="Toggle building animations (monsters and champions always animate)"></button>
           <button type="button" class="base-view-reset-layout"
-            title="Reset the window to its default size and position">Reset size</button>
+            aria-label="Reset to default size"
+            title="Reset the window to its default size and position">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 3h7v2H5v5H3V3Zm11 0h7v7h-2V5h-5V3ZM3 14h2v5h5v2H3v-7Zm16 0h2v7h-7v-2h5v-5Z" />
+            </svg>
+          </button>
           <button type="button" class="base-view-close" aria-label="Close base view" title="Close">&times;</button>
         </div>
       </div>
@@ -433,7 +499,7 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
       closeBaseView();
     }
   };
-  activeView = { backdrop, renderer: null, keyHandler, teardownLayout: null };
+  activeView = { backdrop, renderer: null, keyHandler, teardownLayout: null, generation: 1, animations: false };
   document.body.appendChild(backdrop);
   document.addEventListener("keydown", keyHandler);
   backdrop.querySelector(".base-view-close").addEventListener("click", closeBaseView);
@@ -444,30 +510,50 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
   );
   // Building-animation toggle, remembered across sessions. Monsters and
   // champions are exempt and always animate.
-  let animationsEnabled = loadAnimationsPref();
+  activeView.animations = loadAnimationsPref();
   const animToggle = backdrop.querySelector(".base-view-anim-toggle");
   const syncAnimToggle = () => {
-    animToggle.textContent = animationsEnabled ? "Animations: On" : "Animations: Off";
-    animToggle.setAttribute("aria-pressed", animationsEnabled ? "true" : "false");
-    animToggle.classList.toggle("off", !animationsEnabled);
+    const on = Boolean(activeView?.animations);
+    animToggle.textContent = on ? "Animations: On" : "Animations: Off";
+    animToggle.setAttribute("aria-pressed", on ? "true" : "false");
+    animToggle.classList.toggle("off", !on);
   };
   syncAnimToggle();
   animToggle.addEventListener("click", () => {
-    animationsEnabled = !animationsEnabled;
-    saveAnimationsPref(animationsEnabled);
+    if (!activeView) return;
+    activeView.animations = !activeView.animations;
+    saveAnimationsPref(activeView.animations);
     syncAnimToggle();
-    activeView?.renderer?.setBuildingAnimations?.(animationsEnabled);
+    activeView.renderer?.setBuildingAnimations?.(activeView.animations);
   });
-  // Clicking the dimmed area (outside the window) closes too; clicks inside
-  // the window never bubble out to this.
-  backdrop.addEventListener("pointerdown", (event) => {
-    if (event.target === backdrop) {
-      closeBaseView();
-    }
-  });
+  // The backdrop is transparent to pointer events so the map stays usable
+  // behind the window, which means there is no click-outside-to-close: the
+  // close button and Escape are the ways out.
 
   const status = backdrop.querySelector(".base-view-status");
   const canvas = backdrop.querySelector(".base-view-canvas");
+
+  await loadBaseIntoView({
+    view: activeView, generation: activeView.generation, backdrop, status, canvas,
+    token, baseid, userid, name, isMain, x, y, prepare, recoverToken,
+  });
+}
+
+/**
+ * Loads a base and renders it into an already-built window.
+ *
+ * Shared by the first open and by every in-place swap, so both paths behave
+ * identically. Staleness is decided by `generation` rather than by identity of
+ * the backdrop: a reused window keeps the same element, so only the counter
+ * can tell whether this load is still the one the user is waiting for. Every
+ * await is followed by that check, and a superseded load returns silently
+ * without touching the DOM.
+ */
+async function loadBaseIntoView({
+  view, generation, backdrop, status, canvas,
+  token, baseid, userid, name, isMain, x, y, prepare, recoverToken,
+}) {
+  const current = () => activeView === view && view.generation === generation;
 
   // Optional prepare step: the caller reloads the cell's zone from the game
   // server first, then hands back the freshly observed base id + owner name.
@@ -476,17 +562,17 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
   if (typeof prepare === "function") {
     try {
       const resolved = await prepare((message) => {
-        if (activeView?.backdrop === backdrop) {
+        if (current()) {
           status.textContent = message;
         }
       });
-      if (activeView?.backdrop !== backdrop) {
-        return; // closed while refreshing
+      if (!current()) {
+        return; // closed or superseded while refreshing
       }
       resolvedBaseid = String(resolved?.baseid || "").trim();
       resolvedName = String(resolved?.name || "").trim();
     } catch (error) {
-      if (activeView?.backdrop !== backdrop) {
+      if (!current()) {
         return;
       }
       status.textContent = error?.message || "Could not refresh this cell.";
@@ -495,6 +581,7 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
     }
   }
   if (!resolvedBaseid || resolvedBaseid === "0") {
+    if (!current()) return;
     status.textContent = "No base id is available for this cell.";
     status.classList.add("error");
     return;
@@ -509,8 +596,8 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
       fetchBase(token, resolvedBaseid, userid, recoverToken),
     ]);
   } catch (error) {
-    if (activeView?.backdrop !== backdrop) {
-      return; // closed (or replaced) while loading
+    if (!current()) {
+      return; // closed or superseded while loading
     }
     status.textContent = error?.message
       ? `Could not load this base: ${error.message}`
@@ -518,20 +605,21 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
     status.classList.add("error");
     return;
   }
-  if (activeView?.backdrop !== backdrop) {
-    return; // closed while loading
+  if (!current()) {
+    return; // closed or superseded while loading
   }
 
   // Read-only renderer: pan + zoom only, sprites via the permanent
   // server-side image cache.
   const renderer = new YardRenderer(canvas, gameData, "/imagecache", {
     interactive: false,
-    buildingAnimations: animationsEnabled,
+    buildingAnimations: Boolean(view.animations),
+    isOutpost: !isMain,
     // Scouting must not reveal traps (Booby Trap, Heavy Trap, ...): every
     // props entry with type "trap" is omitted entirely.
     hideBuilding: (typeId, props) => String(props?.type || "") === "trap",
   });
-  activeView.renderer = renderer;
+  view.renderer = renderer;
   canvas.style.cursor = "grab";
   renderer.setTheme("grass");
   renderer.setResources?.(safeObject(data?.resources));
@@ -547,9 +635,9 @@ export async function openBaseView({ token, baseid, userid, title, isMain, prepa
   populatePens(renderer, data);
   status.remove();
   const shown = backdrop.querySelector(".base-view-title");
-  const ownerName = String(data?.name || "").trim() || resolvedName;
-  if (shown && ownerName) {
-    shown.textContent = `${ownerName}'s ${isMain ? "Yard" : "Outpost"}`;
+  const ownerName = String(data?.name || "").trim() || resolvedName || String(name || "").trim();
+  if (shown) {
+    shown.textContent = buildBaseTitle(ownerName, isMain, x, y);
   }
   debugLog(`Base view open: baseid ${resolvedBaseid}, ${renderer.buildings.length} structures.`);
 }

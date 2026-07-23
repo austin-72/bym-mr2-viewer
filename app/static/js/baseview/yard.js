@@ -153,6 +153,9 @@ export class YardRenderer {
     this.hasAnimations = false;
     this.hasCountdowns = false;
     this.interactive = options.interactive !== false;
+    // Outposts suppress harvest ("Full!") alerts, which only make sense on a
+    // main yard where resources are actually collected.
+    this.isOutpost = Boolean(options.isOutpost);
     // Optional predicate (typeId, props) => true to omit a building entirely
     // (the base viewer hides traps: scouting must not reveal them).
     this.hideBuilding = typeof options.hideBuilding === "function" ? options.hideBuilding : null;
@@ -423,8 +426,38 @@ export class YardRenderer {
     let moved = false;
     let last = null;
 
+    // Active pointers, so two fingers can be told apart from one. A second
+    // pointer starts a pinch: the midpoint is held fixed in world space while
+    // the distance between the fingers drives the zoom, which is how every
+    // native map behaves.
+    const pointers = new Map();
+    let pinch = null;
+
+    const pinchDistance = () => {
+      const [a, b] = [...pointers.values()];
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    };
+    const pinchMidpoint = () => {
+      const [a, b] = [...pointers.values()];
+      return { clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 };
+    };
+    const beginPinch = () => {
+      const distance = pinchDistance();
+      if (distance <= 0) return;
+      pinch = { distance, zoom: this.camera.zoom };
+      dragging = false;
+      moved = true; // a pinch is never a tap
+    };
+
     let draggingBuilding = null;
     canvas.addEventListener("pointerdown", (event) => {
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      canvas.setPointerCapture(event.pointerId);
+      if (pointers.size === 2) {
+        beginPinch();
+        return;
+      }
+      if (pointers.size > 2) return;
       dragging = true;
       moved = false;
       last = { x: event.clientX, y: event.clientY };
@@ -432,9 +465,29 @@ export class YardRenderer {
       if (draggingBuilding) {
         draggingBuilding._dragOrigin = { X: draggingBuilding.cartX, Y: draggingBuilding.cartY };
       }
-      canvas.setPointerCapture(event.pointerId);
     });
     canvas.addEventListener("pointermove", (event) => {
+      if (pointers.has(event.pointerId)) {
+        pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      }
+
+      if (pinch && pointers.size >= 2) {
+        const distance = pinchDistance();
+        if (distance > 0) {
+          const midpoint = pinchMidpoint();
+          const before = this.screenToWorld(midpoint);
+          // Same bounds as the wheel path: GLOBAL._MAGNIFICATION_BOUNDS is
+          // (0.6, 2.75), widened a little on the way out.
+          this.camera.zoom = Math.min(2.75, Math.max(0.12, pinch.zoom * (distance / pinch.distance)));
+          const after = this.screenToWorld(midpoint);
+          this.camera.x += before.x - after.x;
+          this.camera.y += before.y - after.y;
+          this.invalidate();
+        }
+        event.preventDefault();
+        return;
+      }
+
       if (dragging && draggingBuilding) {
         // GRID.FromISO: cartX = screenY + screenX/2, cartY = screenY − screenX/2,
         // snapped to the 20-unit lattice.
@@ -462,7 +515,9 @@ export class YardRenderer {
         this.camera.y -= dy / this.camera.zoom;
         last = { x: event.clientX, y: event.clientY };
         this.invalidate();
-      } else if (this.interactive) {
+      } else if (this.interactive && event.pointerType !== "touch") {
+        // Hover only applies to a real cursor; on touch it would leave a
+        // stale highlight behind after every tap.
         const hit = this.hitTest(event);
         if (hit !== this.hovered) {
           this.hovered = hit;
@@ -471,20 +526,47 @@ export class YardRenderer {
         }
       }
     });
+    const releasePointer = (event) => {
+      pointers.delete(event.pointerId);
+      if (pinch && pointers.size < 2) {
+        pinch = null;
+        // Hand control back to the finger still down, without the camera
+        // lurching to meet it.
+        const remaining = [...pointers.values()][0];
+        if (remaining) {
+          dragging = true;
+          last = { x: remaining.x, y: remaining.y };
+        } else {
+          dragging = false;
+        }
+      }
+    };
     canvas.addEventListener("pointerup", (event) => {
+      const wasPinching = Boolean(pinch);
+      releasePointer(event);
+      if (pointers.size > 0) return;
       dragging = false;
       if (draggingBuilding && moved && this.onDragEnd) {
         this.onDragEnd(draggingBuilding, draggingBuilding._dragOrigin);
       }
       draggingBuilding = null;
-      if (!moved && this.interactive) {
+      if (!moved && !wasPinching && this.interactive) {
         this.selected = this.hitTest(event);
         this.invalidate();
         if (this.onSelect) this.onSelect(this.selected);
       }
     });
+    canvas.addEventListener("pointercancel", (event) => {
+      releasePointer(event);
+      if (pointers.size === 0) {
+        dragging = false;
+        draggingBuilding = null;
+      }
+    });
     canvas.addEventListener("pointerleave", () => {
-      dragging = false;
+      if (pointers.size === 0) {
+        dragging = false;
+      }
       if (this.hovered) {
         this.hovered = null;
         this.invalidate();
@@ -1062,6 +1144,9 @@ export class YardRenderer {
   }
 
   drawHarvestAlert(b) {
+    // Outposts have no harvest collection of their own, so a "Full!" pill
+    // there is noise rather than information.
+    if (this.isOutpost) return;
     if (!b.harvest || b.state === "destroyed") return;
     const stored = b.harvest.storedNow();
     if (stored < b.harvest.capacity) return;

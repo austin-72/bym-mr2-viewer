@@ -989,6 +989,15 @@ h2 {
   white-space: nowrap;
 }
 
+/* Touch: the identity block is the widest thing in the toolbar and the least
+   useful there - who you are signed in as is already in the account menu. The
+   Log out button stays. */
+@media (max-width: 900px), (pointer: coarse) {
+  .session-identity {
+    display: none;
+  }
+}
+
 .session-toast {
   position: fixed;
   top: 64px;
@@ -1444,23 +1453,7 @@ h2 {
 }
 
 .mobile-details-close-button {
-  display: grid;
-  place-items: center;
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  border-radius: 12px;
-  background: rgba(14, 12, 10, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
-}
-
-.mobile-details-close-button svg {
-  width: 18px;
-  height: 18px;
-  fill: currentColor;
-  display: block;
 }
 
 .credits-panel {
@@ -1534,7 +1527,8 @@ h2 {
 }
 
 @media (max-width: 900px) {
-  .details-panel {
+  .details-panel,
+  .map-panel .details-panel.open {
     display: none;
   }
 
@@ -1754,10 +1748,27 @@ h2 {
     transition: opacity 180ms ease, transform 220ms ease, height 220ms ease;
   }
 
+  /* The header no longer carries a visible title, so it collapses to just
+     the close button, pinned right and out of the summary's way. */
+  .mobile-details-sheet-header {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    gap: 0;
+  }
+
+  .mobile-details-close-button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
   .mobile-details-content {
-    max-height: min(42dvh, 360px);
+    max-height: min(52dvh, 460px);
     overflow-y: auto;
     overscroll-behavior: contain;
+    /* Clear the floating close button on the first line. */
+    padding-top: 4px;
   }
 
   #app.mobile-details-open .mobile-details-sheet {
@@ -2462,6 +2473,20 @@ h2 {
   max-height: calc(100% - 24px);
   overflow-y: auto;
   z-index: 40;
+  /* Closed by default: it is a popup for a selected cell, not a permanent
+     fixture, and it starts hidden until something is selected. */
+  display: none;
+}
+
+.map-panel .details-panel.open {
+  display: block;
+}
+
+.details-close-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
 }
 
 /* Watch scope */
@@ -2518,8 +2543,68 @@ h2 {
     max-height: calc(100dvh - 74px);
   }
 
-  .map-panel .details-panel {
+  .map-panel .details-panel,
+  .map-panel .details-panel.open {
     display: none;
+  }
+}
+
+/* Touch: the toolbar is a one-handed, thumb-driven strip. Buttons grow to a
+   comfortable target, the row scrolls with momentum and snaps to groups, and
+   the scrollbar itself is hidden because a finger is the scrollbar. */
+@media (max-width: 900px), (pointer: coarse) {
+  .toolbar-scroll {
+    /* Start at the left rather than centring: on a narrow screen the row
+       always overflows, and centring hides the first controls off-screen. */
+    justify-content: flex-start;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .toolbar-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tb-group {
+    scroll-snap-align: start;
+  }
+
+  /* Tighter dividers: 22px of margin+padding per group wastes scarce width. */
+  .tb-group + .tb-group {
+    margin-left: 6px;
+    padding-left: 7px;
+  }
+
+  .tb-button,
+  .toolbar-actions button {
+    min-height: 40px;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .toolbar .icon-button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* Menu contents need finger-sized rows too. */
+  .tb-menu button,
+  .tb-menu select,
+  .tb-menu input,
+  .toolbar .filter-menu button,
+  .toolbar .filter-menu select,
+  .toolbar .filter-menu input {
+    min-height: 40px;
+  }
+
+  /* iOS zooms the page when focusing an input below 16px. */
+  .tb-menu input,
+  .toolbar .filter-menu input,
+  .toolbar input {
+    font-size: 16px;
   }
 }
 
@@ -2736,6 +2821,9 @@ select option {
 
 
 /* Base viewer popup (View Yard / View Outpost) */
+/* The base viewer floats over the map rather than blocking it: no dimming,
+   and pointer events pass straight through the backdrop so the map behind
+   stays pannable and clickable. The window itself re-enables them. */
 .base-view-backdrop {
   position: fixed;
   inset: 0;
@@ -2743,7 +2831,12 @@ select option {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.65);
+  background: none;
+  pointer-events: none;
+}
+
+.base-view-backdrop > .base-view-window {
+  pointer-events: auto;
 }
 
 .base-view-window {
@@ -2772,6 +2865,46 @@ select option {
 
 .base-view-window.dragging .base-view-header {
   cursor: grabbing;
+}
+
+/* Touch layout: a phone has no room for a floating window, so the viewer
+   fills the screen, the drag/resize affordances retire (they need a cursor
+   to be usable), and the header controls become finger-sized. Pinch-to-zoom
+   and one-finger pan on the canvas do the work instead. */
+@media (max-width: 860px), (pointer: coarse) {
+  .base-view-window {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .base-view-header {
+    cursor: default;
+    padding: 10px 8px 10px 12px;
+    gap: 8px;
+  }
+
+  .base-view-title {
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .base-view-header-buttons {
+    gap: 6px;
+  }
+
+  .base-view-anim-toggle,
+  .base-view-reset-layout,
+  .base-view-close {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* Resize grips are pointer-only: on touch they steal drags from the map. */
+  .base-view-resize {
+    display: none;
+  }
 }
 
 .base-view-header-buttons,
@@ -2839,17 +2972,32 @@ select option {
   pointer-events: none;
 }
 
+/* Fullscreen-style toggle. Hidden while the window sits at its default
+   geometry, so the header stays clean until there is something to reset. */
 .base-view-reset-layout {
+  display: none;
   flex: none;
+  width: 30px;
   height: 30px;
-  padding: 0 10px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
-  font: 600 12px/1 "Segoe UI", sans-serif;
-  white-space: nowrap;
   cursor: pointer;
+}
+
+.base-view-window.resized .base-view-reset-layout {
+  display: inline-flex;
+}
+
+.base-view-reset-layout svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  pointer-events: none;
 }
 
 .base-view-reset-layout:hover {
@@ -2877,10 +3025,14 @@ select option {
   white-space: nowrap;
 }
 
-.base-view-close {
+/* Close control shared by the base viewer and the cell popup: one rule, so
+   the two can never drift apart visually. */
+.base-view-close,
+.popup-close {
   flex: none;
   width: 30px;
   height: 30px;
+  padding: 0;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.06);
@@ -2889,9 +3041,11 @@ select option {
   font-weight: 700;
   line-height: 1;
   cursor: pointer;
+  touch-action: manipulation;
 }
 
-.base-view-close:hover {
+.base-view-close:hover,
+.popup-close:hover {
   background: rgba(255, 92, 74, 0.25);
   border-color: rgba(255, 92, 74, 0.5);
 }
@@ -2961,65 +3115,111 @@ select option {
 }
 
 
-/* ── Draggable cell panel ──────────────────────────────────────────────
-   The panel starts docked top-right; dragging the handle switches it to
-   explicit left/top coordinates (set inline by JS) and it stays where the
-   user put it for the session. */
-.details-drag-handle {
+/* Kept in the accessibility tree (screen readers announce the selected cell)
+   but removed from the visual layout. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Cell panel owner summary ──────────────────────────────────────────
+   The panel is fixed in place (docked top-right). Owned cells render as a
+   small player card: avatar, owner line, then plain fact lines separated by
+   rules, rather than the label/value grid used for wild cells. */
+.cell-owner-photo {
+  display: block;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 8px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.cell-owner-line {
+  margin: 0 0 6px;
+  text-align: center;
+  font: 700 14px/1.3 "Segoe UI", sans-serif;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.cell-line {
+  margin: 0 0 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.cell-rule {
+  height: 1px;
+  margin: 8px 0;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* The Jump control sits inline after the coordinates, so the line needs to
+   wrap gracefully and keep the button vertically centred. */
+.cell-line-jump {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin: -6px -6px 6px;
-  padding: 4px 6px;
-  border-radius: 8px;
-  cursor: grab;
-  user-select: none;
-  touch-action: none;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.details-drag-handle:hover {
-  background: rgba(255, 255, 255, 0.05);
+/* Touch: comfortable tap targets and a larger avatar on small screens,
+   where the sheet is wider than the desktop panel. */
+@media (max-width: 860px), (pointer: coarse) {
+  .cell-owner-photo {
+    width: 72px;
+    height: 72px;
+  }
+
+  .cell-owner-line {
+    font-size: 15px;
+  }
+
+  .cell-line {
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+
+  .cell-line-jump .alliance-row-button,
+  .detail-actions .secondary-button {
+    min-height: 40px;
+    padding-inline: 14px;
+  }
+
+  .detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .detail-actions .secondary-button {
+    flex: 1 1 45%;
+  }
 }
 
-.details-panel.dragging .details-drag-handle {
-  cursor: grabbing;
-  background: rgba(242, 199, 107, 0.12);
-}
-
-.details-drag-grip {
-  flex: 1;
-  height: 4px;
-  border-radius: 2px;
-  background:
-    repeating-linear-gradient(90deg,
-      rgba(255, 255, 255, 0.25) 0 4px,
-      transparent 4px 8px);
-}
-
-.details-reset {
-  flex: none;
+.link-button {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--muted);
-  font: 600 10px/1 "Segoe UI", sans-serif;
-  padding: 3px 7px;
-  border-radius: 6px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #f2c76b);
+  text-decoration: underline;
   cursor: pointer;
-  visibility: hidden;
 }
 
-.details-panel.moved .details-reset {
-  visibility: visible;
-}
-
-.details-reset:hover {
+.link-button:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.12);
-}
-
-/* While dragging, the panel must not also scroll its own content */
-.details-panel.dragging {
-  overflow: hidden;
 }
