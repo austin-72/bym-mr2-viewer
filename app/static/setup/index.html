@@ -9,7 +9,8 @@
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        font: 14px/1.5 "Segoe UI", sans-serif;
+        /* Same face the game uses for UI text (Button.as sets Verdana). */
+        font: 14px/1.5 Verdana, Geneva, "DejaVu Sans", Tahoma, sans-serif;
         background: #17120c;
         color: #efe8da;
         padding: 24px;
@@ -38,10 +39,138 @@
         color: #f5eddc;
       }
       textarea { width: 100%; resize: vertical; }
-      button { cursor: pointer; }
-      button:hover { background: rgba(255, 255, 255, 0.12); }
-      button.danger { border-color: rgba(255, 92, 74, 0.5); color: #ff8d7d; }
-      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      /* Same event-stone art as the main site (sprite 1532: shape 40 rest,
+         shape 1531 hover). Sliced 5px vertical / 12px horizontal, `round` so
+         the textured red centre tiles instead of smearing. */
+      button {
+        cursor: pointer;
+        border-style: solid;
+        border-width: 5px 12px;
+        border-image: url("/assets/ui/button/stone.png") 5 12 fill round;
+        border-radius: 0;
+        background: none;
+        /* Same fallback as the main site: clipped to the padding box so it
+           cannot show through the art's transparent corners. */
+        background-color: #8c9290;
+        background-clip: padding-box;
+        border-color: #3a332b;
+        color: #241f19;
+        font-weight: 700;
+        padding: 7px 12px;
+        text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+        transition: filter 110ms ease;
+      }
+      button:hover:not(:disabled), button:focus-visible:not(:disabled) {
+        border-image-source: url("/assets/ui/button/stone_hover.png");
+        color: #f7ecd8;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+      }
+      button:active:not(:disabled) { filter: brightness(0.9); }
+      button:disabled {
+        cursor: default;
+        filter: grayscale(1) brightness(0.72);
+        color: #5d574e;
+        text-shadow: none;
+      }
+      /* Destructive actions rest on the red rather than borrowing a colour
+         the button set does not have. */
+      button.danger {
+        border-image-source: url("/assets/ui/button/stone_hover.png");
+        color: #ffd9cf;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+      }
+      button.danger:hover:not(:disabled) { filter: brightness(1.12); }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+      .row.actions { margin-top: 14px; }
+      .grow { flex: 1; min-width: 200px; }
+      label.inline { display: inline-flex; align-items: center; gap: 6px; }
+
+      /* ── Grouped accordion ─────────────────────────────────────────── */
+      .group { background: none; border: 0; padding: 0; }
+      .grouptitle {
+        margin: 0 0 10px; font-size: 11px; letter-spacing: .16em;
+        text-transform: uppercase; color: #8d8371;
+      }
+      .card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        border-radius: 12px; margin-bottom: 10px; overflow: hidden;
+      }
+      .card > summary {
+        list-style: none; cursor: pointer;
+        display: grid; grid-template-columns: 16px auto 1fr;
+        align-items: baseline; gap: 10px; padding: 13px 16px;
+      }
+      .card > summary::-webkit-details-marker { display: none; }
+      .card > summary:hover { background: rgba(255, 255, 255, 0.03); }
+      .card > summary:focus-visible { outline: 2px solid #f2c76b; outline-offset: -2px; }
+      .chev { display: inline-block; transition: transform 140ms ease; color: #8d8371; }
+      details[open] > summary .chev { transform: rotate(90deg); }
+      .blurb { text-align: right; }
+      .cardbody {
+        padding: 14px 16px 16px; border-top: 1px solid rgba(255, 255, 255, 0.09);
+      }
+      .fieldsetlabel {
+        margin: 16px 0 8px; font-size: 11px; letter-spacing: .12em;
+        text-transform: uppercase; color: #c7bda7;
+      }
+      .cardbody > .fieldsetlabel:first-child { margin-top: 0; }
+      .subhead { margin: 16px 0 6px; font-size: 12.5px; color: #c7bda7; }
+      .small { font-size: 12px; }
+
+      /* Two aligned columns: label left, fixed-width number right, so every
+         value in the section forms one straight edge. */
+      .grid2 {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 8px 26px;
+      }
+      .field {
+        display: grid; grid-template-columns: 1fr 92px;
+        align-items: center; gap: 12px;
+      }
+      .field > span { font-size: 12.5px; color: #a99f8c; }
+      .field input { text-align: right; width: 100%; }
+
+      /* ── Tooltips ──────────────────────────────────────────────────── */
+      [data-tip] { position: relative; }
+      [data-tip]::after {
+        content: attr(data-tip);
+        position: absolute; left: 0; top: calc(100% + 6px); z-index: 40;
+        width: max(260px, 100%); padding: 10px 12px;
+        background: #221a11; color: #efe8da;
+        border: 1px solid rgba(242, 199, 107, .35); border-radius: 8px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+        font-size: 12px; line-height: 1.45; text-align: left; white-space: normal;
+        opacity: 0; visibility: hidden; transition: opacity 120ms ease;
+        pointer-events: none;
+      }
+      [data-tip]:hover::after, [data-tip]:focus-within::after { opacity: 1; visibility: visible; }
+      .hint {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 15px; height: 15px; margin-left: 6px; border-radius: 50%;
+        background: rgba(242, 199, 107, .18); color: #f2c76b;
+        font-size: 10px; cursor: help; vertical-align: middle;
+      }
+
+      /* ── Usage ─────────────────────────────────────────────────────── */
+      .statgrid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px; margin: 12px 0 4px;
+      }
+      .stat {
+        background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .08);
+        border-radius: 10px; padding: 10px 12px;
+      }
+      .stat b { display: block; font-size: 19px; color: #f2c76b; font-weight: 700; }
+      .stat span { font-size: 11.5px; color: #a99f8c; }
+      .usagecols {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 8px 26px; align-items: start;
+      }
+      .bar {
+        height: 6px; border-radius: 3px; background: rgba(242, 199, 107, .8);
+        min-width: 2px; display: inline-block; vertical-align: middle;
+      }
       table { width: 100%; border-collapse: collapse; font-size: 13px; }
       th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.07); }
       th { color: #c7bda7; font-weight: 600; }
@@ -192,6 +321,33 @@
 
       const settingsInputs = () => [...document.querySelectorAll("input[id^='set-']")];
 
+      // The bypass depends on a warm token cache, so "enabled" and "actually
+      // applying to you right now" can disagree. Show both rather than let an
+      // admin wonder why they are being queued.
+      function renderBypassState(payload) {
+        const el = $("bypass-state");
+        if (!el || !payload) return;
+        if (!payload.bypassEnabled) {
+          el.textContent = "\u2014 off; admins queue like everyone else";
+          el.style.color = "";
+        } else if (payload.bypassActive) {
+          el.textContent = "\u2014 active for you right now";
+          el.style.color = "#8fd9a8";
+        } else {
+          el.textContent = "\u2014 on, but not applying to you yet (your token "
+            + "is not cached; it warms on your next verified call)";
+          el.style.color = "#f2c76b";
+        }
+      }
+
+      function renderQueueLimit(payload) {
+        const el = $("queue-limit");
+        if (!el || !payload || !payload.queueLimit) return;
+        el.textContent = `Map traffic is queued against ${payload.queueLimit}/min`
+          + ` \u2014 ${payload.authReserve} slot${payload.authReserve === 1 ? "" : "s"}`
+          + ` of the global limit are held back so sign-ins never queue.`;
+      }
+
       function renderApiStats(stats) {
         if (!stats || !$("rate-stats")) return;
         $("rate-stats").textContent =
@@ -260,20 +416,175 @@
           // Stop quietly if the console was torn down (signed out).
           if (!$("rate-stats")) { clearInterval(statsPoll); statsPoll = null; return; }
           try {
-            const { stats } = await api("/api/admin/api-stats");
-            renderApiStats(stats);
+            const payload = await api("/api/admin/api-stats");
+            renderApiStats(payload.stats);
+            renderBypassState(payload);
+            renderQueueLimit(payload);
           } catch { /* transient; next tick retries */ }
         }, 5000);
       }
 
+
+      // ── Stored usage history ──────────────────────────────────────────
+      // Everything here comes from storage/metrics, so it survives restarts.
+      // The live block above is the last 60 minutes from memory; this is the
+      // long view, and the two are deliberately separate.
+      // Object URLs leak until revoked, and revoking before the click is
+      // processed cancels the download in Safari - hence the timeout.
+      function downloadFile(text, type, filename) {
+        const url = URL.createObjectURL(new Blob([text], { type }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+
+      function usageRange() {
+        const to = $("usage-to")?.value || "";
+        const from = $("usage-from")?.value || "";
+        return { from, to };
+      }
+
+      function usageQuery(extra) {
+        const { from, to } = usageRange();
+        const params = new URLSearchParams();
+        if (from) params.set("from", from);
+        if (to) params.set("to", to);
+        for (const [k, v] of Object.entries(extra || {})) params.set(k, v);
+        return params.toString();
+      }
+
+      function num(n) { return Number(n || 0).toLocaleString("en-US"); }
+
+      function barRow(label, value, max, extra) {
+        const width = max > 0 ? Math.max(2, Math.round((value / max) * 90)) : 0;
+        return `<tr><td>${escapeHtml(label)}</td><td>${num(value)}` +
+               `<span class="bar" style="width:${width}px;margin-left:8px"></span></td>` +
+               (extra === undefined ? "" : `<td>${escapeHtml(extra)}</td>`) + `</tr>`;
+      }
+
+      function renderUsage(report) {
+        if (!report || !$("usage-summary")) return;
+        const days = Math.max(1, report.dayCount || 1);
+        const w = report.wait || {};
+        const up = report.upstream || {};
+        const rj = report.rejects || {};
+        $("usage-summary").innerHTML = [
+          ["Calls", num(report.total)],
+          ["Per day", num(Math.round((report.total || 0) / days))],
+          ["Days covered", num(report.dayCount)],
+          ["Callers", num((report.users || []).length)],
+          ["Avg queue wait", `${num(Math.round(w.avgMs || 0))} ms`],
+          ["Longest wait", `${num(Math.round(w.maxMs || 0))} ms`],
+          ["Rejected", num((rj.queueFull || 0) + (rj.timeout || 0))],
+          ["Upstream errors", num(up.fail || 0)],
+        ].map(([label, value]) =>
+          `<div class="stat"><b>${escapeHtml(String(value))}</b><span>${escapeHtml(label)}</span></div>`
+        ).join("");
+
+        const dayRows = report.days || [];
+        const dayMax = Math.max(1, ...dayRows.map((d) => d.total || 0));
+        $("usage-days").innerHTML = dayRows.length
+          ? dayRows.map((d) => barRow(d.day, d.total, dayMax)).join("")
+          : `<tr><td colspan="2" class="muted">No data in this range.</td></tr>`;
+
+        const bands = report.byBand || {};
+        const bandTotal = (bands.low || 0) + (bands.medium || 0) + (bands.high || 0);
+        const bandMax = Math.max(1, bands.low || 0, bands.medium || 0, bands.high || 0);
+        $("usage-priority").innerHTML = [
+          ["Low (1-5)", bands.low || 0], ["Medium (6-8)", bands.medium || 0],
+          ["High (9-10)", bands.high || 0],
+        ].map(([label, value]) => barRow(label, value, bandMax,
+          bandTotal ? `${Math.round((value / bandTotal) * 100)}%` : "0%")).join("");
+
+        const cats = Object.entries(report.byCategory || {}).sort((a, b) => b[1] - a[1]);
+        const catMax = Math.max(1, ...cats.map(([, v]) => v));
+        $("usage-category").innerHTML = cats.length
+          ? cats.map(([k, v]) => barRow(k, v, catMax)).join("")
+          : `<tr><td colspan="2" class="muted">No data.</td></tr>`;
+
+        const hours = Object.entries(report.hourOfDay || {}).sort((a, b) => b[1] - a[1]).slice(0, 8);
+        const hourMax = Math.max(1, ...hours.map(([, v]) => v));
+        $("usage-hourly").innerHTML = hours.length
+          ? hours.map(([h, v]) => barRow(`${h}:00`, v, hourMax)).join("")
+          : `<tr><td colspan="2" class="muted">No data.</td></tr>`;
+
+        const users = report.users || [];
+        $("usage-users").innerHTML = users.length
+          ? users.slice(0, 60).map((u) => {
+              const avg = u.days ? Math.round(u.calls / u.days) : 0;
+              return `<tr><td>${escapeHtml(u.key)}</td><td>${num(u.calls)}</td>` +
+                     `<td>${num(u.days)}</td><td>${num(avg)}</td></tr>`;
+            }).join("")
+          : `<tr><td colspan="4" class="muted">No callers recorded in this range.</td></tr>`;
+      }
+
+      async function loadUsage() {
+        if (!$("usage-summary")) return;
+        setStatus("usage-status", "Loading\u2026");
+        try {
+          const { report } = await api(`/api/admin/usage?${usageQuery()}`);
+          renderUsage(report);
+          setStatus("usage-status", `${report.from} to ${report.to}`);
+        } catch (error) {
+          setStatus("usage-status", error.message, true);
+        }
+      }
+
+      function initUsage() {
+        if (!$("usage-from")) return;
+        const today = new Date();
+        const iso = (d) => d.toISOString().slice(0, 10);
+        const weekAgo = new Date(today.getTime() - 6 * 86400000);
+        $("usage-to").value = iso(today);
+        $("usage-from").value = iso(weekAgo);
+        $("usage-refresh").onclick = loadUsage;
+        $("usage-export-csv").onclick = async () => {
+          // Navigating to the URL cannot carry X-Viewer-Token, so the admin
+          // gate would reject it. Fetch with the header, then download the
+          // body as a file.
+          try {
+            setStatus("usage-status", "Exporting\u2026");
+            const response = await fetch(`/api/admin/usage?${usageQuery({ format: "csv" })}`,
+              { headers: { "X-Viewer-Token": authToken } });
+            if (!response.ok) throw new Error(`Export failed (${response.status})`);
+            const text = await response.text();
+            const { from, to } = usageRange();
+            downloadFile(text, "text/csv", `bym-usage-${from}_to_${to}.csv`);
+            setStatus("usage-status", "Exported.");
+          } catch (error) {
+            setStatus("usage-status", error.message, true);
+          }
+        };
+        $("usage-export-json").onclick = async () => {
+          try {
+            setStatus("usage-status", "Exporting\u2026");
+            const { report } = await api(`/api/admin/usage?${usageQuery()}`);
+            downloadFile(JSON.stringify(report, null, 2), "application/json",
+              `bym-usage-${report.from}_to_${report.to}.json`);
+            setStatus("usage-status", "Exported.");
+          } catch (error) {
+            setStatus("usage-status", error.message, true);
+          }
+        };
+        loadUsage();
+      }
+
       async function renderSettings() {
-        const { values, stats } = await api("/api/admin/settings");
+        const settingsPayload = await api("/api/admin/settings");
+        const { values, stats } = settingsPayload;
+        renderBypassState(settingsPayload);
+        renderQueueLimit(settingsPayload);
         for (const input of settingsInputs()) {
           const field = input.id.slice(4);
           if (values && field in values) input.value = values[field];
         }
         renderApiStats(stats);
         startStatsPolling();
+        initUsage();
         $("rate-save").onclick = async () => {
           try {
             const payload = {};

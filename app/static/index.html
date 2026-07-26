@@ -269,6 +269,10 @@
                 <input type="checkbox" id="loot-show-toggle">
                 <span>Show loot on map</span>
               </label>
+              <label class="loot-check">
+                <input type="checkbox" id="loot-info-toggle">
+                <span>Show loot in cell info</span>
+              </label>
               <p class="eyebrow loot-resource-eyebrow">Resource</p>
               <div class="loot-resource-list" role="radiogroup" aria-label="Loot resource to display">
                 <label class="loot-radio"><input type="radio" name="loot-resource" value="total" checked><span>Loot (total)</span></label>
@@ -295,6 +299,12 @@
               </div>
               <p id="scan-status" class="muted nav-help"></p>
             </div>
+          </div>
+
+            <!-- Admin console (administrators only) -->
+          <div class="tb-item" id="setup-item" hidden>
+            <button id="setup-button" class="tb-button" type="button"
+              title="Open the admin console">Setup</button>
           </div>
           </div>
         </div>
@@ -332,20 +342,6 @@
       </header>
 
       <div class="corner-buttons">
-      <button id="settings-button" class="corner-button" type="button" title="Admin settings" hidden>&#9881;</button>
-      <button
-        id="refresh-button"
-        class="corner-button map-control-button"
-        type="button"
-        aria-label="Refresh world map"
-        title="Refresh the visible map area"
-        disabled
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 5a7 7 0 1 1-6.65 9.18 1 1 0 1 1 1.9-.62A5 5 0 1 0 8 8.58V11a1 1 0 0 1-1.7.71l-3-3a1 1 0 0 1 0-1.42l3-3A1 1 0 0 1 8 5v1.46A6.96 6.96 0 0 1 12 5Z" />
-        </svg>
-        <span id="refresh-button-cooldown" class="map-control-cooldown" aria-hidden="true" hidden></span>
-      </button>
       <button id="zoom-in-button" class="corner-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
       <button id="zoom-out-button" class="corner-button" type="button" aria-label="Zoom out" title="Zoom out">-</button>
       <button id="help-button" class="corner-button" type="button" title="Help &amp; privacy">?</button>
@@ -411,11 +407,11 @@
       <main class="map-shell">
         <section id="map-panel" class="map-panel panel">
           <canvas id="map-canvas"></canvas>
-          <aside id="details-panel" class="panel details-panel">
+          <aside id="details-panel" class="panel details-panel game-frame">
             <button
               type="button"
               id="details-close-button"
-              class="popup-close details-close-button"
+              class="popup-close details-close-button frame-button-close"
               aria-label="Close cell information"
               title="Close"
             >&times;</button>
@@ -433,19 +429,19 @@
               </div>
             </div>
           </div>
-          <div id="mobile-details-sheet" class="panel mobile-details-sheet" aria-hidden="true">
+          <div id="mobile-details-sheet" class="panel mobile-details-sheet game-frame" aria-hidden="true">
             <div class="mobile-details-sheet-header">
-              <div>
-                <h2 id="mobile-details-title" class="visually-hidden">No selection</h2>
-              </div>
-              <button
-                id="mobile-details-close-button"
-                class="popup-close mobile-details-close-button"
-                type="button"
-                aria-label="Close cell information"
-                title="Close"
-              >&times;</button>
+              <h2 id="mobile-details-title" class="visually-hidden">No selection</h2>
             </div>
+            <!-- Direct child of the sheet so it lands in the frame's own
+                 corner slot rather than inside the header box. -->
+            <button
+              id="mobile-details-close-button"
+              class="popup-close mobile-details-close-button frame-button-close"
+              type="button"
+              aria-label="Close cell information"
+              title="Close"
+            >&times;</button>
             <div id="mobile-details-content" class="details-content mobile-details-content">
               Tap a visible MR2 cell to inspect it.
             </div>

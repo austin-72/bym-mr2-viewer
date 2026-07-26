@@ -8,6 +8,9 @@ import {
   SEARCH_RESULT_LIMIT,
   STABLE_VIEWER_CONFIG,
   buildTokenStorageKey,
+  storageGet,
+  storageSet,
+  storageRemove,
   TRIBE_FILTER_OPTIONS,
   TYPE_FILTER_OPTIONS,
   createEmptyBaseFilter,
@@ -80,6 +83,8 @@ export class ViewerApp {
     this.ownerOutpostCounts = new Map();
     this.openMenuId = null;
     this.showLoot = false;
+    // Separate from showLoot: this one governs the cell popup's loot rows.
+    this.showLootInfo = false;
     this.lootResource = "total";
     this.isGuestView = false;
     this.guestAttemptId = 0;
@@ -184,7 +189,6 @@ export class ViewerApp {
       helpButton: document.getElementById("help-button"),
       helpPanel: document.getElementById("help-panel"),
       helpClose: document.getElementById("help-close"),
-      settingsButton: document.getElementById("settings-button"),
       hideRequestForm: document.getElementById("hide-request-form"),
       hideRequestStatus: document.getElementById("hide-request-status"),
       hideRequestReason: document.getElementById("hide-request-reason"),
@@ -209,9 +213,12 @@ export class ViewerApp {
       filterOutpostHelp: document.getElementById("filter-outpost-help"),
       lootItem: document.getElementById("loot-item"),
       lootShowToggle: document.getElementById("loot-show-toggle"),
+      lootInfoToggle: document.getElementById("loot-info-toggle"),
       allianceItem: document.getElementById("alliance-item"),
       allianceBadge: document.getElementById("alliance-badge"),
       scanItem: document.getElementById("scan-item"),
+      setupItem: document.getElementById("setup-item"),
+      setupButton: document.getElementById("setup-button"),
       allianceContent: document.getElementById("alliance-content"),
       toolbar: document.getElementById("toolbar"),
       filterMatchCount: document.getElementById("filter-match-count"),
@@ -273,7 +280,10 @@ export class ViewerApp {
   bindEvents() {
     this.elements.loginForm.addEventListener("submit", (event) => this.handleLogin(event));
     this.elements.logoutButton.addEventListener("click", () => this.handleLogout());
-    this.elements.refreshButton.addEventListener("click", () => this.handleRefreshMap());
+    // The corner reload control was removed; the refresh path is still
+    // reachable programmatically, so everything downstream stays null-safe
+    // rather than being deleted.
+    this.elements.refreshButton?.addEventListener("click", () => this.handleRefreshMap());
     this.elements.findHomeButton.addEventListener("click", () => this.renderer.focusHome());
     this.elements.zoomInButton.addEventListener("click", () => this.renderer.zoomBy(1.18, true));
     this.elements.zoomOutButton.addEventListener("click", () => this.renderer.zoomBy(1 / 1.18, true));
@@ -303,6 +313,9 @@ export class ViewerApp {
     this.bindToolbarMenus();
     this.elements.lootShowToggle?.addEventListener("change", (event) => {
       this.toggleLootDisplay(event.target.checked);
+    });
+    this.elements.lootInfoToggle?.addEventListener("change", (event) => {
+      this.toggleLootInfo(event.target.checked);
     });
     for (const radio of document.querySelectorAll("input[name='loot-resource']")) {
       radio.addEventListener("change", (event) => {
@@ -337,7 +350,7 @@ export class ViewerApp {
         this.elements.helpPanel.hidden = true;
       }
     });
-    this.elements.settingsButton?.addEventListener("click", () => {
+    this.elements.setupButton?.addEventListener("click", () => {
       window.location.href = "/setup/";
     });
     this.elements.hideRequestSubmit?.addEventListener("click", () => this.submitHideRequest());
@@ -471,7 +484,7 @@ export class ViewerApp {
   }
 
   async restoreSession() {
-    const storedToken = window.localStorage.getItem(buildTokenStorageKey(this.config));
+    const storedToken = storageGet(buildTokenStorageKey(this.config));
     if (!storedToken) {
       debugLog("No stored token for this server; showing sign-in form.");
       this.setSignedOutState();
@@ -502,7 +515,7 @@ export class ViewerApp {
         mapSize: `${session?.map?.width}x${session?.map?.height}`,
         outposts: session?.map?.outposts?.length ?? 0,
       });
-      window.localStorage.setItem(buildTokenStorageKey(this.config), session.token);
+      storageSet(buildTokenStorageKey(this.config), session.token);
       this.session = session;
       this.guestAttemptId += 1;
       this.isGuestView = false;
@@ -706,11 +719,15 @@ export class ViewerApp {
     this.refreshInFlight = false;
     this.refreshCooldownUntil = 0;
     this.clearRefreshCooldownTimer();
-    window.localStorage.removeItem(buildTokenStorageKey(this.config));
+    storageRemove(buildTokenStorageKey(this.config));
     this.session = null;
     this.setSignedOutState({ sessionStatus: message });
   }
 
+  // NOTE: nothing calls this at present. The corner reload control was
+  // removed and no replacement was bound, so the ally-zone refresh below is
+  // reachable only from the console. Kept intact rather than deleted: it is
+  // working behaviour, and re-binding it to a toolbar item is one line.
   async handleRefreshMap() {
     if (!this.session || this.isGuestView || !this.renderer || this.refreshInFlight) {
       return;
@@ -1091,6 +1108,117 @@ export class ViewerApp {
     this.animateMobileDetailsResize(previousMobileDetailsHeight, shouldAnimateMobileResize);
   }
 
+  /**
+   * Builds the "refresh this zone, then resolve the base id" step that runs
+   * before a base loads.
+   *
+   * It used to be inlined in the View Yard click handler, which meant the
+   * outpost picker and the retry button opened bases straight from cached
+   * cell data - a stale or missing base id there failed with no way to
+   * recover. Every path that opens a base now goes through this.
+   */
+  buildBasePrepare(cellX, cellY) {
+    return async (setStatus) => {
+      const zone = {
+        x: Math.floor(cellX / MR2.zoneSize) * MR2.zoneSize,
+        y: Math.floor(cellY / MR2.zoneSize) * MR2.zoneSize,
+      };
+      const known = this.renderer?.cellCache?.get(cellKey(cellX, cellY)) || null;
+      try {
+        if (this.isGuestView) {
+          // The game API only serves cells for the signed-in player's own
+          // world, so a guest-viewed world refreshes from the newest
+          // shared-cache observation instead.
+          setStatus("Refreshing zone from the shared cache\u2026");
+          await this.renderer?.refreshZonesFromSharedCache([zone]);
+        } else {
+          setStatus("Reloading zone from the game server\u2026");
+          // Dedicated priority-10 fetch, straight out - never queued behind
+          // (or waiting on) the panning backlog for this zone.
+          await this.renderer?.reloadZoneNow(zone, 10);
+        }
+      } catch (error) {
+        // The base itself is still fetched live below; a failed zone refresh
+        // only means we resolve from older cell data.
+        console.warn("[BYM-MR2] Zone refresh before base view failed:", error);
+      }
+      const fresh = this.renderer?.cellCache?.get(cellKey(cellX, cellY)) || known;
+      const baseid = String(fresh?.bid || known?.bid || "").trim();
+      if (!baseid || baseid === "0") {
+        throw new Error(this.isGuestView
+          ? "No base id in the shared cache for this cell yet. It appears once a signed-in player on this world refreshes the zone."
+          : "The game server reported no base id for this cell.");
+      }
+      return { baseid, name: String(fresh?.n || known?.n || "") };
+    };
+  }
+
+  /**
+   * Main yard first, then outposts by empire value descending, ties by x then
+   * y - the order the yard viewer's picker shows them in.
+   *
+   * Membership comes from the base save when one is supplied: /base/load
+   * returns the owner's complete outpost list, whereas the map cache only
+   * holds zones this browser has actually fetched. Deriving the list purely
+   * from the cache made the count read low for anyone who had not panned over
+   * their whole empire, and read zero outright whenever getPlayerProfile bailed
+   * on a hidden cell.
+   *
+   * The cache is still where the detail comes from: /base/load carries only
+   * coordinates and base ids, so empire value - and therefore the kit - is
+   * looked up per cell, and an outpost in an unexplored zone shows its kit as
+   * a dash rather than being dropped.
+   */
+  buildOwnedBaseList(ownerId, authoritativeOutposts = null, homebase = null) {
+    const cells = this.renderer?.getPlayerProfile(Number(ownerId))?.cells || [];
+    const byCoord = new Map();
+    for (const entry of cells) {
+      byCoord.set(`${Number(entry.x)},${Number(entry.y)}`, entry);
+    }
+
+    // getarea reports v per cell from that cell's own save, so this is the
+    // outpost's own empire value - not the owner's maximum, which would
+    // classify every outpost of a large player as Ultra.
+    const describe = (x, y, isMain, baseid) => {
+      const cached = byCoord.get(`${x},${y}`);
+      const known = cached !== undefined;
+      const value = Number(cached?.v || 0);
+      return {
+        x, y,
+        baseid: String(baseid || cached?.bid || ""),
+        value,
+        isMain,
+        known,
+        kit: isMain ? "N/A" : (known ? this.describeOutpostKit(value) : "\u2014"),
+      };
+    };
+
+    const cachedOf = (kind) => cells
+      .filter((entry) => Number(entry.b) === kind)
+      .map((entry) => describe(Number(entry.x), Number(entry.y),
+        kind === MR2.yardTypes.main, entry.bid));
+
+    const main = cachedOf(MR2.yardTypes.main);
+    if (!main.length && Array.isArray(homebase) && homebase.length === 2) {
+      main.push(describe(Number(homebase[0]), Number(homebase[1]), true, ""));
+    }
+
+    const fromSave = Array.isArray(authoritativeOutposts)
+      ? authoritativeOutposts
+          .map((entry) => (Array.isArray(entry)
+            ? { x: Number(entry[0]), y: Number(entry[1]), baseid: entry[2] }
+            : { x: Number(entry?.x), y: Number(entry?.y), baseid: entry?.baseid }))
+          .filter((entry) => Number.isFinite(entry.x) && Number.isFinite(entry.y))
+          .map((entry) => describe(entry.x, entry.y, false, entry.baseid))
+      : [];
+
+    const outposts = (fromSave.length ? fromSave : cachedOf(MR2.yardTypes.outpost))
+      .sort((left, right) => (right.value - left.value)
+        || (left.x - right.x) || (left.y - right.y));
+
+    return [...main, ...outposts];
+  }
+
   renderDetailsPanel({ titleEl, contentEl, cell, emptyMessage }) {
     if (!titleEl || !contentEl) {
       return;
@@ -1130,17 +1258,25 @@ export class ViewerApp {
     const actions = document.createElement("div");
     actions.className = "detail-actions";
 
-    if (Number(cell.uid || 0) > 0) {
+    // Wild monster camps have no owner (uid 0) but do carry a base id, so
+    // they open in the viewer like any other base - the guard used to be
+    // owner-based and shut them out. baseType is already in scope from the
+    // summary branch above; redeclaring it here was a SyntaxError that took
+    // the whole module out.
+    const isWildCamp = baseType === MR2.yardTypes.wildMonster;
+    if (Number(cell.uid || 0) > 0 || isWildCamp) {
       // Base viewer: read-only popup rendered with the real game sprites.
       // Clicking reloads the cell's zone from the game server first, so the
       // base id and ownership are current, then loads and renders the base.
-      const baseType = Number(cell.b);
-      if (baseType === MR2.yardTypes.main || baseType === MR2.yardTypes.outpost) {
+      if (baseType === MR2.yardTypes.main || baseType === MR2.yardTypes.outpost
+        || isWildCamp) {
         const isMain = baseType === MR2.yardTypes.main;
         const viewBaseButton = document.createElement("button");
         viewBaseButton.type = "button";
         viewBaseButton.className = "secondary-button";
-        viewBaseButton.textContent = isMain ? "View Yard" : "View Outpost";
+        viewBaseButton.textContent = isWildCamp
+          ? "View Camp"
+          : (isMain ? "View Yard" : "View Outpost");
         const token = this.session?.token || "";
         if (!token) {
           // Signed-out visitors get the sign-in form rather than a dead
@@ -1150,7 +1286,8 @@ export class ViewerApp {
           viewBaseButton.addEventListener("click", () => {
             this.openToolbarMenu("menu-account");
             this.elements.emailInput?.focus();
-            this.setSessionStatus?.(`Sign in to view ${cell.n ? `${cell.n}'s ` : ""}${isMain ? "yard" : "outpost"}.`);
+            const kind = isWildCamp ? "camp" : (isMain ? "yard" : "outpost");
+            this.setSessionStatus?.(`Sign in to view ${cell.n ? `${cell.n}'s ` : ""}${kind}.`);
           });
         } else {
           viewBaseButton.addEventListener("click", () => {
@@ -1164,40 +1301,33 @@ export class ViewerApp {
               userid: this.session?.user?.userid ?? 0,
               name: String(cell.n || "").trim(),
               isMain,
+              isWild: isWildCamp,
+              // Your own base gets the white yard boundary and the resource
+              // readout, matching how the game presents it.
+              isOwnYard: Number(cell.uid || 0) > 0
+                && Number(cell.uid) === Number(this.session?.user?.userid ?? -1),
+              // Visiting someone else's yard shows their picture on the
+              // level plate (UI_TOP frame "view"). Outposts carry no avatar,
+              // so fall back to the owner's main cell, which does.
+              ownerPic: this.getCellAvatarUrl(cell)
+                || this.getCellAvatarUrl(
+                  (this.renderer?.getPlayerProfile(Number(cell.uid))?.cells || [])
+                    .find((entry) => Number(entry.b) === MR2.yardTypes.main),
+                ),
+              // The map cache knows every base this player owns, which is
+              // more reliable than the base save's own outposts field. Main
+              // yard first, then outposts by empire value.
+              outpostList: this.buildOwnedBaseList(cell.uid),
+              // Lets the viewer refresh a zone before opening any base from
+              // the picker, exactly as this click does.
+              prepareFor: (px, py) => this.buildBasePrepare(px, py),
+              // Called once /base/load answers, so the list can be rebuilt
+              // from the save's own outpost array rather than the cache.
+              baseListFor: (saveOutposts, homebase) =>
+                this.buildOwnedBaseList(cell.uid, saveOutposts, homebase),
               x: cellX,
               y: cellY,
-              prepare: async (setStatus) => {
-                const zone = {
-                  x: Math.floor(cellX / MR2.zoneSize) * MR2.zoneSize,
-                  y: Math.floor(cellY / MR2.zoneSize) * MR2.zoneSize,
-                };
-                try {
-                  if (this.isGuestView) {
-                    // The game API only serves cells for the signed-in
-                    // player's own world, so a guest-viewed world refreshes
-                    // from the newest shared-cache observation instead.
-                    setStatus("Refreshing zone from the shared cache\u2026");
-                    await this.renderer?.refreshZonesFromSharedCache([zone]);
-                  } else {
-                    setStatus("Reloading zone from the game server\u2026");
-                    // Dedicated priority-10 fetch, straight out - never queued
-                    // behind (or waiting on) the panning backlog for this zone.
-                    await this.renderer?.reloadZoneNow(zone, 10);
-                  }
-                } catch (error) {
-                  // The base itself is still fetched live below; a failed
-                  // zone refresh only means we resolve from older cell data.
-                  console.warn("[BYM-MR2] Zone refresh before base view failed:", error);
-                }
-                const fresh = this.renderer?.cellCache?.get(cellKey(cellX, cellY)) || cell;
-                const baseid = String(fresh.bid || cell.bid || "").trim();
-                if (!baseid || baseid === "0") {
-                  throw new Error(this.isGuestView
-                    ? "No base id in the shared cache for this cell yet. It appears once a signed-in player on this world refreshes the zone."
-                    : "The game server reported no base id for this cell.");
-                }
-                return { baseid, name: String(fresh.n || cell.n || "") };
-              },
+              prepare: this.buildBasePrepare(cellX, cellY),
             }).catch((error) => console.error("[BYM-MR2] Base view failed:", error));
           });
         }
@@ -1330,10 +1460,13 @@ export class ViewerApp {
     const flingerRange = getFlingerRange(cell.f, isMain);
     addLine(`Flinger Range: ${formatNumber(flingerRange)} cells (level ${formatNumber(flingerLevel)})`);
 
-    // Loot is raid intel, so it stays administrator-only - but within that,
-    // every resource is listed even at zero so the absence of loot is itself
+    // Loot is raid intel: administrator-only, and only while "Show loot in
+    // cell info" is ticked. Owned cells render through this summary rather
+    // than buildDetailRows, so gating only the latter left the toggle doing
+    // nothing on exactly the cells it matters for. Within that, every
+    // resource is listed even at zero so the absence of loot is itself
     // readable rather than ambiguous.
-    if (this.isViewerAdmin) {
+    if (this.isViewerAdmin && this.showLootInfo) {
       addRule();
       addLine(`Loot: ${formatNumber(getCellLootTotal(cell))}`);
       for (const [key, label] of [["r1", "Twigs"], ["r2", "Pebbles"], ["r3", "Putty"], ["r4", "Goo"]]) {
@@ -1633,10 +1766,12 @@ export class ViewerApp {
       rows.push(["Empire Value", formatNumber(Number(cell.v || 0))]);
     }
 
-    // Loot (Loot total, Twigs, Pebbles, Putty, Goo) is sensitive raid intel,
-    // so it is shown to administrators only - matching the admin-only loot
-    // display on the map.
-    if (this.isViewerAdmin) {
+    // Loot (Loot total, Twigs, Pebbles, Putty, Goo) is sensitive raid intel:
+    // administrators only, and only while "Show loot in cell info" is ticked.
+    // That is deliberately a different switch from the on-map pills - opening
+    // a cell should not surface raid numbers just because the map is showing
+    // them.
+    if (this.isViewerAdmin && this.showLootInfo) {
       const lootTotal = getCellLootTotal(cell);
       if (lootTotal > 0) {
         rows.push(["Loot", formatNumber(lootTotal)]);
@@ -1673,9 +1808,10 @@ export class ViewerApp {
       rows.push(["Locked", "Owner online or under attack"]);
     }
 
-    // Outpost stored resources are loot intel too: administrators only,
-    // matching the main-yard loot block above and the on-map loot display.
-    if (this.isViewerAdmin && isOutpost && cell.r && typeof cell.r === "object") {
+    // Outpost stored resources are loot intel too: same gate as the
+    // main-yard block above.
+    if (this.isViewerAdmin && this.showLootInfo && isOutpost
+      && cell.r && typeof cell.r === "object") {
       const resourceLabels = [
         ["r1", "Twigs"],
         ["r2", "Pebbles"],
@@ -1763,6 +1899,7 @@ export class ViewerApp {
       const validLoot = ["total", "r1", "r2", "r3", "r4"];
       this.lootResource = validLoot.includes(uiPrefs.lootResource) ? uiPrefs.lootResource : "total";
       this.toggleLootDisplay(uiPrefs.showLoot === true);
+      this.toggleLootInfo(uiPrefs.showLootInfo === true);
     } else {
       this.elements.jumpStatus.textContent = "Sign in to jump to cells.";
       this.bookmarks = [];
@@ -1818,6 +1955,9 @@ export class ViewerApp {
   applyAdminUi() {
     if (this.elements.scanItem) {
       this.elements.scanItem.hidden = !this.isViewerAdmin;
+    }
+    if (this.elements.setupItem) {
+      this.elements.setupItem.hidden = !this.isViewerAdmin;
     }
   }
 
@@ -2212,8 +2352,9 @@ export class ViewerApp {
   }
 
   // Zones containing any cell owned by the signed-in player or an alliance
-  // member, capped at `limit`. Shared by the watch cycle and the manual
-  // map-refresh button.
+  // member, capped at `limit`. Used by the watch cycle, and by
+  // handleRefreshMap - which currently has no control bound to it (see
+  // below).
   collectAllyZoneOrigins(limit) {
     if (!this.renderer) {
       return [];
@@ -3482,6 +3623,9 @@ export class ViewerApp {
   updateRefreshButtonState() {
     const button = this.elements.refreshButton;
     const cooldownBadge = this.elements.refreshButtonCooldown;
+    if (!button) {
+      return;
+    }
     // Refresh needs a live view of the user's own world; cached guest views
     // (signed in or not) cannot pull fresh data.
     const hasSession = Boolean(this.session) && !this.isGuestView;
@@ -3965,6 +4109,15 @@ export class ViewerApp {
     }
   }
 
+  // The cell popup's loot rows are a separate switch from the on-map pills:
+  // an admin can want the numbers on the map without them appearing in every
+  // cell they open, or the other way round.
+  toggleLootInfo(force) {
+    this.showLootInfo = typeof force === "boolean" ? force : !this.showLootInfo;
+    this.saveUiPref("showLootInfo", this.showLootInfo);
+    this.applyLootUi();
+  }
+
   toggleLootDisplay(force) {
     // Tracks the user's intent; the effective on-map display is gated to admins
     // in applyLootUi (loot is admin-only).
@@ -3993,8 +4146,8 @@ export class ViewerApp {
     if (this.elements.lootItem) {
       this.elements.lootItem.hidden = !admin;
     }
-    if (this.elements.settingsButton) {
-      this.elements.settingsButton.hidden = !admin;
+    if (this.elements.setupItem) {
+      this.elements.setupItem.hidden = !admin;
     }
     if (!admin && this.openMenuId === "menu-loot") {
       this.closeToolbarMenus();
@@ -4002,11 +4155,18 @@ export class ViewerApp {
     if (this.elements.lootShowToggle) {
       this.elements.lootShowToggle.checked = this.showLoot;
     }
+    if (this.elements.lootInfoToggle) {
+      this.elements.lootInfoToggle.checked = this.showLootInfo;
+    }
     for (const radio of document.querySelectorAll("input[name='loot-resource']")) {
       radio.checked = radio.value === this.lootResource;
     }
     this.renderer?.setLootResource(this.lootResource);
     this.renderer?.setShowLoot(admin && this.showLoot);
+    // The cell popup's loot rows follow the same toggle, so an open popup has
+    // to be redrawn - otherwise turning Loot off left the numbers on screen
+    // until the cell was reselected.
+    this.renderDetails();
   }
 
   // ------------------------------------------------------------------

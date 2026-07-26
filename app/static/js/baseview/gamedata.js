@@ -154,16 +154,56 @@ export function formatNumber(value) {
 
 // ── Player level (BASE.as XP table, cumulative points per level) ─────────
 
-export const XP_LEVELS = [0, 900, 3500, 5000, 7500, 10500, 14700, 20580, 28812, 40337, 56472, 79060, 110684, 154958, 216941, 303717, 425204, 595286, 833401, 1166761, 1633465, 2286851, 3201591, 4482228, 6275119, 8785167, 12299234, 17218927, 24106498, 33749097, 47248736, 66148230, 92607522, 129650530, 181510743, 254115040, 355761056, 498065478, 697291669, 976208337, 1366691671, 1913368339, 2678715675, 3750201945, 5250282723, 7350395812, 10290554137, 14406775792, 20169486109, 28237280553, 39532192774, 55345069884, 77483097838, 108476336973, 151866871762];
+// BASE.s_levels: cumulative points for each level. The game client ships 100
+// entries; BYMR's server-side calculateBaseLevel only ships the first 56, so
+// the two disagree above level 56. The HUD is drawn by the client, so the
+// client's table is what a player sees and is what we mirror here.
+export const XP_LEVELS = [
+  0, 900, 3500, 5000, 7500, 10500, 14700, 20580, 28812, 40337, 56472, 79060,
+  110684, 154958, 216941, 303717, 425204, 595286, 833401, 1166761, 1633465,
+  2286851, 3201591, 4482228, 6275119, 8785167, 12299234, 17218927, 24106498,
+  33749097, 47248736, 66148230, 92607522, 129650530, 181510743, 254115040,
+  355761056, 498065478, 697291669, 976208337, 1366691671, 1913368339,
+  2678715675, 3750201945, 5250282723, 7350395812, 10290554137, 14406775792,
+  20169486109, 28237280553, 39532192774, 55345069884, 77483097838,
+  108476336973, 151866871762, 212613620467, 297659068653, 357190880000,
+  428629050000, 514354860000, 617225830000, 740670990000, 888805180000,
+  1066566210000, 1279879450000, 1535853400000, 1843026400000, 2211631680000,
+  2653958010000, 3184749610000, 3821699530000, 4586039430000, 5503247310000,
+  6603896770000, 7924676120000, 9509611340000, 11411533600000, 13693840320000,
+  16432608380000, 19719130050000, 23662956060000, 28395547270000,
+  34074656720000, 40889588060000, 49067505670000, 58881006800000,
+  70657208160000, 84788649790000, 101746379740000, 122095655680000,
+  146514786810000, 175817744170000, 210981293000000, 253177551600000,
+  303813061920000, 364575674300000, 437490809160000, 524988970990000,
+  629986765180000, 755984118210000,
+];
 
-export function levelFromPoints(points) {
-  const p = Number(points) || 0;
+/**
+ * BASE.BaseLevel. The points that drive the level are the save's `points`
+ * PLUS `basevalue` - 10% of the build cost and time of every standing
+ * building, held on the save and only ever ratcheting upwards. Reading
+ * `points` alone understates the level on any developed base.
+ */
+export function baseLevelInfo(basePoints, baseValue = 0) {
+  const points = (Number(basePoints) || 0) + (Number(baseValue) || 0);
   let level = 1;
-  for (let i = 0; i < XP_LEVELS.length; i++) {
-    if (p >= XP_LEVELS[i]) level = i + 1;
+  let lower = 0;
+  let upper = XP_LEVELS[1] || 1;
+  for (let i = 0; i < XP_LEVELS.length - 1; i++) {
+    if (points >= XP_LEVELS[i]) {
+      level = i + 1;
+      lower = XP_LEVELS[i];
+      upper = XP_LEVELS[i + 1];
+    }
   }
-  return level;
+  return { level, lower, upper, points };
 }
+
+export function levelFromPoints(points, baseValue = 0) {
+  return baseLevelInfo(points, baseValue).level;
+}
+
 
 // ── Monster names (game-data monsterKeys) ────────────────────────────────
 
@@ -1130,8 +1170,14 @@ export function guardianSheetCandidates(t, level) {
  * ticks. G1/G2/G3: idle row 0, walking rows 1..7. G4: walking rows 0..8
  * (levels 1-3) or 0..9 (levels 4+). G5: rows 0..9 for idle and walking.
  */
+const GUARDIAN_ANIM_DIVISOR = 4;
+
 export function guardianRow(t, level, moving, tick) {
-  const step = Math.floor(tick / 8);
+  // Champion sheets are the MovieClip's frames laid out as rows. The game
+  // advances them with ENTER_FRAME; at the viewer's 40-step second a divisor
+  // of 4 gives ~10 rows/sec, which matches the in-game walk cadence. (8 was
+  // half that and read as sluggish.)
+  const step = Math.floor(tick / GUARDIAN_ANIM_DIVISOR);
   if (t === 5) return step % 10;
   if (t === 4) return step % (level > 3 ? 10 : 9);
   return moving ? (step % 7) + 1 : 0;

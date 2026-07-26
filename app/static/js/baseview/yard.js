@@ -94,13 +94,13 @@ function perlinAlpha(baseX, baseY, seed) {
 const THEMES = {
   grass: {
     tiles: [
-      "yardbg/grass/2174_isograss1_isograss1.png",
-      "yardbg/grass/2175_isograss2_isograss2.png",
-      "yardbg/grass/2172_isograss3_isograss3.png",
-      "yardbg/grass/2173_isograss4_isograss4.png",
-      "yardbg/grass/2177_isograss5_isograss5.png",
-      "yardbg/grass/2178_isograss6_isograss6.png",
-      "yardbg/grass/2176_isograss7_isograss7.png",
+      "/assets/yardbg/grass/isograss1.png",
+      "/assets/yardbg/grass/isograss2.png",
+      "/assets/yardbg/grass/isograss3.png",
+      "/assets/yardbg/grass/isograss4.png",
+      "/assets/yardbg/grass/isograss5.png",
+      "/assets/yardbg/grass/isograss6.png",
+      "/assets/yardbg/grass/isograss7.png",
     ],
     base: "#2f4a20",
     void: "#101c10",
@@ -108,19 +108,121 @@ const THEMES = {
   },
   lava: {
     tiles: [
-      "yardbg/lava/2169_inferno_lava1_inferno_lava1.png",
-      "yardbg/lava/2171_inferno_lava2_inferno_lava2.png",
-      "yardbg/lava/2170_inferno_lava3_inferno_lava3.png",
-      "yardbg/lava/2165_inferno_lava4_inferno_lava4.png",
+      "/assets/yardbg/lava/lava1.png",
+      "/assets/yardbg/lava/lava2.png",
+      "/assets/yardbg/lava/lava3.png",
+      "/assets/yardbg/lava/lava4.png",
     ],
     base: "#4a1808",
     void: "#1c0a04",
     grid: "rgba(0, 0, 0, 0.18)",
   },
 };
-const ANIM_FRAME_MS = 1000 / 24; // per ENTER_FRAME at the SWF's 24fps
+const ANIM_FRAME_MS = 1000 / 24; // building anim strips
+// Pen movement advances once per ENTER_FRAME, and the SWF header declares
+// 40fps - stepping at 24 ran creeps and champions at 60% of game speed.
+const PEN_FRAME_MS = 1000 / 40;
 const HATCH_FRAME_MS = 1000 / 12; // BUILDING13.TickFast: every 2nd frame
+
+// BuildingOverlay strips: a 51x300 sheet of 50 progress rows and a 51x120
+// sheet of 20 health rows, both 6px tall, sampled one row at a time.
+const OVERLAY_PROGRESS = "/assets/gameui/overlay_progress.png";
+const OVERLAY_HP = "/assets/gameui/overlay_hp.png";
+const OVERLAY_ROW_H = 6;
+const OVERLAY_W = 51;
+// ImageText.Get(text, 9, 0.6, ...) draws a TextField into a bitmap, so the
+// glyphs start one 2px TextField gutter in. BuildingOverlay then copies that
+// bitmap into bmdtext at y = -1 and places bmdtext at y = -32, which puts the
+// top of the lettering at -32 + 2 - 1 = -31. A 9px cap height ends around -22,
+// clearing the progress bar at -20 by roughly 2px.
+const OVERLAY_LABEL_SIZE = 9;
+const OVERLAY_LABEL_TOP = -31;
+
+/** BuildingOverlay: int(49 / total * (total - remaining)). */
+function overlayProgressRow(total, remaining) {
+  const t = Number(total) || 0;
+  if (t <= 0) return -1;
+  const done = Math.max(0, Math.min(t, t - Math.max(0, remaining)));
+  return Math.max(0, Math.min(49, Math.floor((49 / t) * done)));
+}
+
+/** BuildingOverlay: 19 - int(19 / maxHealth * health), blank once dead. */
+function overlayHealthRow(health, maxHealth) {
+  if (health === null || health === undefined) return -1;
+  const hp = Number(health);
+  const max = Number(maxHealth) || 0;
+  if (!max || hp <= 0 || hp >= max) return -1;
+  return Math.max(0, Math.min(19, 19 - Math.floor((19 / max) * hp)));
+}
+
+// KEYS bdg_state_*, as ImageText renders them into the overlay label.
+const OVERLAY_LABELS = {
+  building: "BUILDING",
+  upgrading: "UPGRADING",
+  fortifying: "FORTIFYING",
+  repairing: "REPAIRING",
+};
 const ANIM_START_AT_ZERO = new Set([9, 19, 25, 54]); // BFOUNDATION Setup
+
+// ── Animation gating ────────────────────────────────────────────────────
+// The game only runs most anim strips while the building is doing something.
+// Left ungated, a yard is a wall of perpetual motion that reads as busy when
+// nothing is happening, so each rule below mirrors the class that owns it.
+
+// Idle machinery: the strip exists but the game never loops it here.
+const NEVER_ANIMATE = new Set([
+  9,   // Monster Juicer
+  19,  // Wild Monster Baiter
+  22,  // Monster Bunker
+  25,  // Tesla Tower
+  129, // Inferno Quake Tower
+]);
+
+// Turret strips are DIRECTION sheets, not loops: each frame is the barrel
+// rotated one step. BTOWER.Rotate: angle = atan2(dy, dx) in PATHING (grid)
+// space, degrees, normalised to 0-360, then int(angle / 11.25) -> 32
+// headings. Resting on frame 0 is why an unaimed tower faces bottom-right.
+const TURRET_TYPES = new Set([
+  21,  // Sniper Tower
+  23,  // Laser Tower
+  115, // Aerial Defense (flak) Tower
+  118, // Railgun Tower
+  132, // Inferno Magma Tower
+  136, // Spurtz Cannon
+  137, // Black Spurtz Cannon
+]);
+const TURRET_HEADINGS = 32; // BTOWER.Rotate: 360 / 11.25
+// BUILDING23.Track divides by 6.66 instead, so the laser tower's strip is a
+// 54-step rotation rather than the usual 32. Indexing its sheet as 32 makes
+// the barrel lag the pointer by an ever-growing angle.
+const TURRET_HEADINGS_BY_TYPE = new Map([[23, 54]]); // 360 / 6.66
+
+// Buildings that animate only while working. Each predicate takes the raw
+// save record and returns whether that job is running.
+const BUSY_ANIMATE = new Map([
+  // BUILDING13: _inProduction != "" && _productionStage == 1.
+  [13, (raw) => String(raw?.rIP || "") !== "" && Number(raw?.rPS || 0) === 1],
+  // BUILDING26 / MONSTERLAB export `upg` while a research/training runs.
+  [26, (raw) => Boolean(raw?.upg)],
+  [116, (raw) => Boolean(raw?.upg)],
+  // SiegeBuilding.TickFast animates while any weapon is upgrading; the job
+  // list persists as unlockingWeapons2 (older saves: unlockingWeapons).
+  [133, (raw) => hasSiegeJob(raw)],
+  [134, (raw) => hasSiegeJob(raw)],
+  // BUILDING8 keys off CREATURELOCKER._unlocking, which lives in the save's
+  // top-level lockerdata rather than the building record - supplied through
+  // setLockerData(). Without it the locker stays still, which is the safe
+  // default for a viewer.
+  [8, (raw, renderer) => renderer.lockerUnlocking],
+]);
+
+function hasSiegeJob(raw) {
+  for (const key of ["unlockingWeapons2", "unlockingWeapons"]) {
+    const jobs = raw?.[key];
+    if (jobs && typeof jobs === "object" && Object.keys(jobs).length > 0) return true;
+  }
+  return false;
+}
 
 export class YardRenderer {
   // options.interactive=false (map-viewer base popup): pan + zoom stay
@@ -153,8 +255,17 @@ export class YardRenderer {
     this.hasAnimations = false;
     this.hasCountdowns = false;
     this.interactive = options.interactive !== false;
-    // Outposts suppress harvest ("Full!") alerts, which only make sense on a
-    // main yard where resources are actually collected.
+    // Where turrets point. Null until the pointer moves (or a tap lands), so
+    // an untouched yard shows them at their resting heading.
+    this.aimPoint = null;
+    // Set from the save's lockerdata; gates the Monster Locker animation.
+    this.lockerUnlocking = false;
+    // Your own yard gets the white boundary and the resource readout, the
+    // way the game shows it.
+    this.isOwnYard = Boolean(options.isOwnYard);
+    this.resources = null;
+    // Outposts keep their resource gatherers animating even when full; on a
+    // main yard a full gatherer is idle and stops.
     this.isOutpost = Boolean(options.isOutpost);
     // Optional predicate (typeId, props) => true to omit a building entirely
     // (the base viewer hides traps: scouting must not reveal them).
@@ -169,9 +280,9 @@ export class YardRenderer {
       // Animations and live countdowns need continuous redraws; otherwise
       // draw only when something changed.
       if (this.penEntities.length) {
-        const now = Math.floor(performance.now() / ANIM_FRAME_MS);
+        const now = Math.floor(performance.now() / PEN_FRAME_MS);
         if (!this.lastPenStep) this.lastPenStep = now;
-        const steps = Math.min(10, now - this.lastPenStep);
+        const steps = Math.min(16, now - this.lastPenStep);
         if (steps > 0) {
           this.stepPens(steps);
           this.lastPenStep = now;
@@ -231,7 +342,10 @@ export class YardRenderer {
   // Builds the MAPBG mega-tile once all tile sprites are loaded.
   buildGround() {
     if (this.groundCanvas) return this.groundCanvas;
-    const tiles = this.theme.tiles.map((path) => this.sprite(this.assetBase + path));
+    // Tiles are bundled locally, so an absolute path is used as-is; only
+    // relative paths get the CDN-proxy prefix.
+    const tiles = this.theme.tiles.map((path) =>
+      this.sprite(path.startsWith("/") ? path : this.assetBase + path));
     if (!tiles.every((entry) => entry.ready)) return null;
     const composite = document.createElement("canvas");
     composite.width = GROUND_W;
@@ -337,7 +451,12 @@ export class YardRenderer {
         let t = Number(record.t);
         // BASE.as: on a main yard, building id 0 is forced to the Town Hall.
         if (this.forceTownHallAtZero && key === "0" && t !== 14) t = 14;
-        let l = Number(record.l ?? 1) || 1;
+        // The save omits `l` at level 1 and writes 0 while a fresh build is
+        // still running. Keep both: `rawLevel` drives the cost lookups the way
+        // BFOUNDATION does, `l` is the art level (imageData[0] falls back to
+        // imageData[1], so level 0 draws the level-1 sprite).
+        const rawLevel = Number(record.l ?? 1) || 0;
+        let l = rawLevel > 0 ? rawLevel : 1;
         // BASE.as: stone wall records are the wooden wall at level 2.
         if (t === 18) {
           t = 17;
@@ -356,10 +475,37 @@ export class YardRenderer {
           else if (Number(hp) < maxHp * 0.5) state = "damaged"; // BFOUNDATION:529
         }
 
-        // Countdowns: cB/cU are seconds remaining as of savetime.
+        // Countdowns: cB/cU/cF/cR are seconds remaining as of savetime, and
+        // rE is the repair flag. BFOUNDATION.Export writes all five.
         const elapsed = this.savetime ? nowEpoch - this.savetime : 0;
-        const buildRemaining = Number(record.cB) > 0 ? Number(record.cB) - elapsed : 0;
-        const upgradeRemaining = Number(record.cU) > 0 ? Number(record.cU) - elapsed : 0;
+        const remainingOf = (key) =>
+          Number(record[key]) > 0 ? Number(record[key]) - elapsed : 0;
+        const buildRemaining = remainingOf("cB");
+        const upgradeRemaining = remainingOf("cU");
+        const fortifyRemaining = remainingOf("cF");
+        const rebuildRemaining = remainingOf("cR");
+        const endsAt = (secs) => (secs > 0 ? Date.now() + secs * 1000 : 0);
+
+        // Totals for the progress bar. BuildingOverlay reads costs[_lvl] for
+        // both build and upgrade (costs is 0-indexed, so at level L that is
+        // the cost of L -> L+1, and at level 0 it is the initial build), sums
+        // costs[0..prefab-1] for a prefab, and fortify_costs[fort] to fortify.
+        const props = this.gameData.get(t);
+        const costs = Array.isArray(props?.costs) ? props.costs : null;
+        const fortCosts = Array.isArray(props?.fortify_costs) ? props.fortify_costs : null;
+        const prefab = Number(record.prefab) || 0;
+        const fort = Number(record.fort ?? 0) || 0;
+        const timeAt = (arr, i) =>
+          arr ? Number(arr[Math.max(0, Math.min(arr.length - 1, i))]?.time) || 0 : 0;
+        let buildTotal = timeAt(costs, rawLevel);
+        if (prefab && costs) {
+          buildTotal = 0;
+          for (let i = 0; i < prefab && i < costs.length; i++) {
+            buildTotal += Number(costs[i]?.time) || 0;
+          }
+        }
+        const upgradeTotal = timeAt(costs, rawLevel);
+        const fortifyTotal = timeAt(fortCosts, fort);
 
         return {
           key,
@@ -370,15 +516,22 @@ export class YardRenderer {
           cartY,
           x: Math.floor(cartX - cartY), // GRID.ToISO
           y: Math.floor((cartX + cartY) * 0.5),
-          fort: Number(record.fort ?? 0) || 0,
+          rawLevel,
+          fort,
           state,
           hp: hp !== undefined ? Number(hp) : null,
           maxHp,
           harvest: HARVESTER_RESOURCE[t]
             ? harvesterInfo(this.gameData.get(t), l, record, this.savetime)
             : null,
-          buildEndsAt: buildRemaining > 0 ? Date.now() + buildRemaining * 1000 : 0,
-          upgradeEndsAt: upgradeRemaining > 0 ? Date.now() + upgradeRemaining * 1000 : 0,
+          buildEndsAt: endsAt(buildRemaining),
+          upgradeEndsAt: endsAt(upgradeRemaining),
+          fortifyEndsAt: endsAt(fortifyRemaining),
+          rebuildEndsAt: endsAt(rebuildRemaining),
+          repairing: Number(record.rE) > 0,
+          buildTotal,
+          upgradeTotal,
+          fortifyTotal,
           animPhase: Math.random(), // scaled to int(r * (frames - 2)) at draw
           raw: record,
         };
@@ -387,12 +540,10 @@ export class YardRenderer {
       .filter((b) => !this.hideBuilding || !this.hideBuilding(b.t, this.gameData.get(b.t)))
       .sort((a, b) => a.y - b.y || a.x - b.x);
 
-    this.hasAnimations = this.buildings.some((b) => {
-      const bundle = this.gameData.imagesForLevel(b.t, this.effectiveLevel(b.t, b.l));
-      const suffix = b.state === "damaged" ? "damaged" : "";
-      return bundle?.entry?.["anim" + suffix] && b.state !== "destroyed";
-    });
-    this.hasCountdowns = this.buildings.some((b) => b.buildEndsAt || b.upgradeEndsAt);
+    this.refreshAnimationState();
+    this.hasCountdowns = this.buildings.some(
+      (b) => b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt,
+    );
 
     this.fitCamera();
     this.invalidate();
@@ -507,6 +658,12 @@ export class YardRenderer {
         }
         return;
       }
+      // Turrets follow the pointer wherever it is, panning or not. On touch
+      // there is no hover, so the aim point is set on tap instead.
+      if (event.pointerType !== "touch") {
+        this.setAimPoint(this.screenToWorld(event));
+      }
+
       if (dragging && last) {
         const dx = event.clientX - last.x;
         const dy = event.clientY - last.y;
@@ -550,6 +707,9 @@ export class YardRenderer {
         this.onDragEnd(draggingBuilding, draggingBuilding._dragOrigin);
       }
       draggingBuilding = null;
+      if (!moved && !wasPinching && event.pointerType === "touch") {
+        this.setAimPoint(this.screenToWorld(event));
+      }
       if (!moved && !wasPinching && this.interactive) {
         this.selected = this.hitTest(event);
         this.invalidate();
@@ -632,17 +792,42 @@ export class YardRenderer {
     return entry;
   }
 
-  setHatchState(activeByKey) {
-    let changed = false;
-    for (const b of this.buildings) {
-      if (b.t !== 13) continue;
-      const active = Boolean(activeByKey?.[b.key]);
-      if (b.hatchActive !== active) {
-        b.hatchActive = active;
-        changed = true;
-      }
+  /**
+   * Recomputes whether the continuous redraw loop is needed. Only strips that
+   * will actually move count: with most buildings now gated on being busy, an
+   * idle yard drops to static rendering entirely, which matters on phones.
+   * Must be re-run whenever a gating input changes (buildings, locker state).
+   */
+  refreshAnimationState() {
+    const previous = this.hasAnimations;
+    this.hasAnimations = this.buildings.some((b) => {
+      const bundle = this.gameData.imagesForLevel(b.t, this.effectiveLevel(b.t, b.l));
+      const suffix = b.state === "damaged" ? "damaged" : "";
+      if (!bundle?.entry?.["anim" + suffix] || b.state === "destroyed") return false;
+      // Turrets redraw on pointer movement, not on a timer.
+      if (TURRET_TYPES.has(b.t)) return false;
+      return b.t === 6 || this.shouldAnimate(b);
+    });
+    this.hasAnimations = this.hasAnimations || this.penEntities.length > 0;
+    if (previous !== this.hasAnimations) this.invalidate();
+  }
+
+  /**
+   * Feeds the save's top-level `lockerdata` in, so the Monster Locker can
+   * animate while a creature is unlocking. CREATURELOCKER treats an entry
+   * with t == 1 as in-progress; anything else is locked or already owned.
+   */
+  setLockerData(lockerData) {
+    let unlocking = false;
+    if (lockerData && typeof lockerData === "object") {
+      unlocking = Object.values(lockerData)
+        .some((entry) => entry && typeof entry === "object" && Number(entry.t) === 1);
     }
-    if (changed) this.invalidate();
+    if (this.lockerUnlocking !== unlocking) {
+      this.lockerUnlocking = unlocking;
+      this.refreshAnimationState();
+      this.invalidate();
+    }
   }
 
   repositionBuilding(building, cartX, cartY) {
@@ -725,22 +910,46 @@ export class YardRenderer {
         y: b.y + this.gameData.footprint(b.t) / 2,
         draw: () => this.drawBuilding(b, "top"),
       })),
-      ...this.penEntities.map((e) => ({ y: e.y, draw: () => this.drawPenEntity(e) })),
+      // Pen occupants sort against their own home rather than by raw y. The
+      // cage sprite is one image: its lower half is the front wall and must
+      // occlude an occupant standing there, while its upper half is the back
+      // wall and the occupant should cover it. So anything in the back half
+      // (above the home origin) draws just after the building, and anything
+      // in the front half just before it. `sub` breaks ties by the
+      // occupant's own y, so of two champions the lower one paints last.
+      ...this.penEntities.map((e) => {
+        const homeDepth = e.home && e.homeType
+          ? e.home.y + this.gameData.footprint(e.homeType) / 2
+          : e.y;
+        const inBackHalf = e.home ? e.y < e.home.y : false;
+        return {
+          y: homeDepth + (inBackHalf ? 0.5 : -0.5),
+          sub: e.y,
+          draw: () => this.drawPenEntity(e),
+        };
+      }),
       ...this.mushrooms.map((shroom) => ({
         y: Number(shroom?.y ?? 0),
         draw: () => this.drawMushroom(shroom),
       })),
-    ].sort((a, b) => a.y - b.y);
+    ].sort((a, b) => a.y - b.y || (a.sub ?? 0) - (b.sub ?? 0));
     for (const item of layerItems) item.draw();
+
+    // BuildingOverlay is a child of the building's own clip in game, so it
+    // sits inside the camera transform and scales with zoom.
+    for (const b of this.buildings) this.drawBuildingOverlay(b);
+    this.hasCountdowns = this.buildings.some(
+      (b) => b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt,
+    );
 
     // Screen-space overlays (constant size regardless of zoom)
     ctx.restore();
     ctx.save();
-    for (const b of this.buildings) this.drawCountdown(b);
-    for (const b of this.buildings) this.drawHarvestAlert(b);
     if (this.hovered) this.drawTooltip(this.hovered);
     ctx.restore();
   }
+
+
 
   worldToScreen(x, y) {
     return {
@@ -749,13 +958,18 @@ export class YardRenderer {
     };
   }
 
+  // Building coordinates in a base save are cartesian and centred on the
+  // origin (kit layouts contain negative X/Y), so the yard diamond is centred
+  // on (0,0) too. YARD_HALF is the default half-extent; expandable yards
+  // override it via setYardExtent().
   traceYardDiamond() {
     const { ctx } = this;
+    const half = this.yardHalf || YARD_HALF;
     ctx.beginPath();
-    ctx.moveTo(0, -YARD_HALF);
-    ctx.lineTo(YARD_HALF * 2, 0);
-    ctx.lineTo(0, YARD_HALF);
-    ctx.lineTo(-YARD_HALF * 2, 0);
+    ctx.moveTo(0, -half);
+    ctx.lineTo(half * 2, 0);
+    ctx.lineTo(0, half);
+    ctx.lineTo(-half * 2, 0);
     ctx.closePath();
   }
 
@@ -771,10 +985,11 @@ export class YardRenderer {
 
     // Rect-tile the isograss variants across the visible clipped region,
     // variant chosen by a stable per-cell hash so the mix never flickers.
-    const left = Math.max(camera.x, -YARD_HALF * 2);
-    const top = Math.max(camera.y, -YARD_HALF);
-    const right = Math.min(camera.x + viewW / camera.zoom, YARD_HALF * 2);
-    const bottom = Math.min(camera.y + viewH / camera.zoom, YARD_HALF);
+    const half = this.yardHalf || YARD_HALF;
+    const left = Math.max(camera.x, -half * 2);
+    const top = Math.max(camera.y, -half);
+    const right = Math.min(camera.x + viewW / camera.zoom, half * 2);
+    const bottom = Math.min(camera.y + viewH / camera.zoom, half);
     const startGX = Math.floor(left / GRASS_W) * GRASS_W;
     const startGY = Math.floor(top / GRASS_H) * GRASS_H;
     const ground = this.buildGround();
@@ -793,7 +1008,8 @@ export class YardRenderer {
         for (let gx = startGX; gx < right; gx += GRASS_W) {
           const tiles = this.theme.tiles;
           const hash = Math.abs(((gx / GRASS_W) * 73856093) ^ ((gy / GRASS_H) * 19349663)) % tiles.length;
-          const entry = this.sprite(this.assetBase + tiles[hash]);
+          const path = tiles[hash];
+          const entry = this.sprite(path.startsWith("/") ? path : this.assetBase + path);
           if (entry.ready) ctx.drawImage(entry.img, gx, gy);
         }
       }
@@ -816,11 +1032,22 @@ export class YardRenderer {
     }
     ctx.restore();
 
-    // Yard edge
+    // Yard edge. Viewing your own yard, the game draws this as a bright white
+    // boundary marking the buildable area; someone else's base gets the plain
+    // dark edge, so it stays obvious whose yard you are looking at.
     this.traceYardDiamond();
-    ctx.lineWidth = 3 / camera.zoom;
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
-    ctx.stroke();
+    if (this.isOwnYard) {
+      ctx.lineWidth = 4 / camera.zoom;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.stroke();
+      ctx.lineWidth = 1 / camera.zoom;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.stroke();
+    } else {
+      ctx.lineWidth = 3 / camera.zoom;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.stroke();
+    }
   }
 
   /** True when this building has any animation sheet for its state - the
@@ -890,17 +1117,26 @@ export class YardRenderer {
     if (!entry.ready) return;
     const [rx, ry, fw, fh] = rect;
 
-    // BUILDING13: animates only while actively hatching, at half rate;
-    // otherwise the sheet rests on frame 0 (TickFast resets _animTick).
+    // Turret barrels are direction sheets: pick the frame that points at the
+    // aim point (pointer, or last tap on touch) rather than looping. Done
+    // before every other rule, including the "animations off" toggle, because
+    // this is orientation, not animation.
+    if (TURRET_TYPES.has(b.t)) {
+      const frame = this.turretFrame(b, frames);
+      this.ctx.drawImage(entry.img, frame * fw, 0, fw, fh, b.x + rx, b.y + ry, fw, fh);
+      return;
+    }
+
     let frame;
     if (b.t === 6) {
       // BUILDING6: the anim strip is a storage-fullness gauge, not a loop -
       // it keeps its state frame even with animations disabled.
       frame = Math.min(this.siloFrame ?? 0, frames - 1);
-    } else if (!this.buildingAnimations) {
-      frame = 0; // animations off: every looping sheet rests on frame 0
+    } else if (!this.buildingAnimations || !this.shouldAnimate(b)) {
+      frame = 0; // resting frame
     } else if (b.t === 13) {
-      frame = b.hatchActive ? Math.floor(performance.now() / HATCH_FRAME_MS) % frames : 0;
+      // BUILDING13 runs at half rate (TickFast: every 2nd frame).
+      frame = Math.floor(performance.now() / HATCH_FRAME_MS) % frames;
     } else {
       // BFOUNDATION Setup: _animTick starts at int(random() * (frames - 2)),
       // except types 9/19/25/54 which start at 0; advance per ENTER_FRAME.
@@ -908,6 +1144,68 @@ export class YardRenderer {
       frame = (Math.floor(performance.now() / ANIM_FRAME_MS) + start) % frames;
     }
     this.ctx.drawImage(entry.img, frame * fw, 0, fw, fh, b.x + rx, b.y + ry, fw, fh);
+  }
+
+  /** Whether this building's looping strip should be running right now. */
+  shouldAnimate(b) {
+    if (NEVER_ANIMATE.has(b.t)) return false;
+
+    // Nothing animates while the building is mid-job: BFOUNDATION gates every
+    // anim on _countdownBuild + _countdownUpgrade == 0, and the same applies
+    // to fortifying and rebuilding.
+    const raw = b.raw || {};
+    if (b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt || b.rebuildEndsAt) {
+      return false;
+    }
+
+    // Resource gatherers stop once their store is full - a full collector is
+    // idle, not working. Outposts are exempt: their gatherers keep running.
+    if (b.harvest && !this.isOutpost && b.harvest.storedNow() >= b.harvest.capacity) {
+      return false;
+    }
+
+    const busy = BUSY_ANIMATE.get(b.t);
+    return busy ? Boolean(busy(raw, this)) : true;
+  }
+
+  /**
+   * Direction frame for a turret, following BTOWER.Rotate.
+   *
+   * The game works in PATHING (cartesian grid) space, so both the tower and
+   * the aim point are converted out of isometric screen space first, then
+   * atan2 gives the heading and int(angle / 11.25) the frame. Sheets that
+   * ship fewer than 32 frames are mapped proportionally rather than clamped,
+   * so the full circle stays reachable.
+   */
+  turretFrame(b, frames) {
+    if (!this.aimPoint) return 0; // untouched: rests bottom-right, as in game
+    const headings = Math.min(frames, TURRET_HEADINGS_BY_TYPE.get(b.t) || TURRET_HEADINGS);
+    const muzzle = YardRenderer.fromIso(b.x, b.y);
+    const target = YardRenderer.fromIso(this.aimPoint.x, this.aimPoint.y);
+    let angle = Math.atan2(target.y - (muzzle.y + 35), target.x - (muzzle.x + 35)) * 57.2957795;
+    if (angle < 0) angle += 360;
+    return Math.min(headings - 1, Math.floor((angle / 360) * headings));
+  }
+
+  /**
+   * Points every turret at a world coordinate. Called on pointer movement,
+   * and on tap for touch devices where there is no hover to follow.
+   */
+  setAimPoint(point) {
+    if (!point) {
+      if (!this.aimPoint) return;
+      this.aimPoint = null;
+      this.invalidate();
+      return;
+    }
+    const previous = this.aimPoint;
+    // Sub-pixel jitter cannot change a 11.25-degree bucket; skipping those
+    // redraws keeps a still pointer from forcing repaints.
+    if (previous && Math.abs(previous.x - point.x) < 2 && Math.abs(previous.y - point.y) < 2) {
+      return;
+    }
+    this.aimPoint = { x: point.x, y: point.y };
+    this.invalidate();
   }
 
   drawEffect(decal) {
@@ -973,6 +1271,7 @@ export class YardRenderer {
    */
   setResources(resources) {
     const res = resources && typeof resources === "object" ? resources : {};
+    this.resources = res;
     let cur = 0;
     let max = 0;
     for (let i = 1; i < 5; i++) { //   the source's 1..4 loop
@@ -1014,7 +1313,12 @@ export class YardRenderer {
         const dx = ent.target.x - ent.x;
         const dy = ent.target.y - ent.y;
         const dist = Math.hypot(dx, dy);
-        const speed = ent.speed * 0.5 * 0.5; // move(): pen quarter speed
+        // CreepBase/ChampionBase: _speed = moveSpeed * 0.5, halved again for
+        // pen behaviour. Champions differ in that ChampionBase derives
+        // moveSpeed as (guardian speed / 2) first, so they end up at an
+        // eighth of their stat rather than a quarter.
+        const base = ent.kind === "guardian" ? ent.speed * 0.5 : ent.speed;
+        const speed = base * 0.5 * 0.5;
         if (dist > Math.max(1, speed)) {
           const angle = Math.atan2(dy, dx);
           ent.x += Math.cos(angle) * speed;
@@ -1127,33 +1431,84 @@ export class YardRenderer {
 
   // ── screen-space overlays ─────────────────────────────────────────────
 
-  drawCountdown(b) {
-    const endsAt = b.buildEndsAt || b.upgradeEndsAt;
-    if (!endsAt) return;
-    const remaining = Math.ceil((endsAt - Date.now()) / 1000);
-    if (remaining <= 0) {
-      b.buildEndsAt = 0;
-      b.upgradeEndsAt = 0;
-      this.hasCountdowns = this.buildings.some((x) => x.buildEndsAt || x.upgradeEndsAt);
-      return;
+  /**
+   * BuildingOverlay.Update: a state label, a progress bar and a health bar,
+   * anchored at the building origin (plus _overlayOffset, which nothing in
+   * the codebase ever sets away from 0,0).
+   *
+   *   label     51-wide slot at (-26, -32), 21px tall, centred in the slot
+   *   progress  51x6 at (-26, -20)
+   *   health    51x6 at (-26, -14)
+   *
+   * The game never draws a clock over a building - the remaining time only
+   * shows in the worker queue - so neither do we.
+   */
+  drawBuildingOverlay(b) {
+    const now = Date.now();
+    if (b.buildEndsAt && b.buildEndsAt <= now) b.buildEndsAt = 0;
+    if (b.upgradeEndsAt && b.upgradeEndsAt <= now) b.upgradeEndsAt = 0;
+    if (b.fortifyEndsAt && b.fortifyEndsAt <= now) b.fortifyEndsAt = 0;
+
+    let label = "";
+    let row = -1;
+    if (b.repairing) {
+      // Repairing sets the label and then blanks the progress bitmap.
+      label = OVERLAY_LABELS.repairing;
+    } else if (b.buildEndsAt) {
+      label = OVERLAY_LABELS.building;
+      row = overlayProgressRow(b.buildTotal, (b.buildEndsAt - now) / 1000);
+    } else if (b.upgradeEndsAt) {
+      label = OVERLAY_LABELS.upgrading;
+      row = overlayProgressRow(b.upgradeTotal, (b.upgradeEndsAt - now) / 1000);
+    } else if (b.fortifyEndsAt) {
+      label = OVERLAY_LABELS.fortifying;
+      row = overlayProgressRow(b.fortifyTotal, (b.fortifyEndsAt - now) / 1000);
     }
-    const label = (b.buildEndsAt ? "⚒ " : "⬆ ") + formatCountdown(remaining);
-    const size = this.gameData.footprint(b.t);
-    const pos = this.worldToScreen(b.x, b.y - size * 0.35);
-    this.drawPill(pos.x, pos.y, label, "#a4e22e");
+
+    const hpRow = b.state === "destroyed" ? -1 : overlayHealthRow(b.hp, b.maxHp);
+    if (!label && hpRow < 0) return;
+
+    const { ctx } = this;
+    const left = b.x - 26;
+    if (label) {
+      ctx.save();
+      // ImageText.Get(text, 9, 0.6, [GlowFilter(0, 1, 2, 2, 4, 1)]) - 9px
+      // with a tight black glow, which a round-joined stroke reproduces.
+      // Same stack the yard's other canvas text uses, so the overlay labels
+      // and the tooltips are set in one face. "GROBOLDpro" is not a family
+      // anything here declares - the @font-face names are Groboldov and
+      // Grobold - so it is only ever hit when the font is installed locally;
+      // it stays first for those machines, with the real webfont behind it.
+      // ImageText.Get sets the overlay labels in Groboldov; the aliases in
+      // front cover machines with the client's fonts installed locally.
+      ctx.font = `700 ${OVERLAY_LABEL_SIZE}px GROBOLDpro, Groboldov, GROBOLD,`
+        + ` Grobold, Verdana, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#000";
+      ctx.strokeText(label, left + OVERLAY_W / 2, b.y + OVERLAY_LABEL_TOP);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, left + OVERLAY_W / 2, b.y + OVERLAY_LABEL_TOP);
+      ctx.restore();
+    }
+    if (row >= 0) {
+      const strip = this.sprite(OVERLAY_PROGRESS);
+      if (strip.ready) {
+        ctx.drawImage(strip.img, 0, OVERLAY_ROW_H * row, OVERLAY_W, OVERLAY_ROW_H,
+          left, b.y - 20, OVERLAY_W, OVERLAY_ROW_H);
+      }
+    }
+    if (hpRow >= 0) {
+      const strip = this.sprite(OVERLAY_HP);
+      if (strip.ready) {
+        ctx.drawImage(strip.img, 0, OVERLAY_ROW_H * hpRow, OVERLAY_W, OVERLAY_ROW_H,
+          left, b.y - 14, OVERLAY_W, OVERLAY_ROW_H);
+      }
+    }
   }
 
-  drawHarvestAlert(b) {
-    // Outposts have no harvest collection of their own, so a "Full!" pill
-    // there is noise rather than information.
-    if (this.isOutpost) return;
-    if (!b.harvest || b.state === "destroyed") return;
-    const stored = b.harvest.storedNow();
-    if (stored < b.harvest.capacity) return;
-    const size = this.gameData.footprint(b.t);
-    const pos = this.worldToScreen(b.x, b.y - size * 0.3);
-    this.drawPill(pos.x, pos.y, "Full!", "#f4c542");
-  }
 
   drawTooltip(b) {
     const name = this.gameData.displayName(b.t);
@@ -1165,7 +1520,7 @@ export class YardRenderer {
 
   drawPill(cx, cy, text, color) {
     const { ctx } = this;
-    ctx.font = "700 12px GROBOLDpro,'Comic Sans MS','Trebuchet MS',sans-serif";
+    ctx.font = "700 12px GROBOLDpro,Groboldov,GROBOLD,Grobold,Verdana,sans-serif";
     const width = ctx.measureText(text).width + 16;
     const height = 20;
     const x = cx - width / 2;
@@ -1185,9 +1540,3 @@ export class YardRenderer {
   }
 }
 
-function formatCountdown(seconds) {
-  if (seconds >= 86400) return Math.floor(seconds / 86400) + "d " + Math.floor((seconds % 86400) / 3600) + "h";
-  if (seconds >= 3600) return Math.floor(seconds / 3600) + "h " + Math.floor((seconds % 3600) / 60) + "m";
-  if (seconds >= 60) return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
-  return seconds + "s";
-}

@@ -10,6 +10,22 @@
   --accent-strong: #ffdc91;
   --danger: #ff8c69;
   --shadow: rgba(0, 0, 0, 0.35);
+
+  /* The game embeds exactly two faces (DefineFont2 in assets.swf):
+       Verdana / Verdana Bold  - every TextField the UI sets in code,
+                                 including Button.as (_format.font = "Verdana")
+       Groboldov / Bold        - fontId 31, used by every HUD field: the
+                                 resource totals, the level number, tName on
+                                 the level plate, and ImageText.Get for the
+                                 building overlay labels
+     GROBOLD and GROBOLDpro are also embedded and are the same display family,
+     kept in the fallback chain for anyone who has them installed locally.
+
+     Verdana is web-safe on Windows and macOS; DejaVu Sans is the closest
+     metric match on Linux, which is why it sits ahead of the generic. */
+  --font-ui: Verdana, Geneva, "DejaVu Sans", Tahoma, sans-serif;
+  --font-display: "Groboldov", "GROBOLDpro", "GROBOLD", "Grobold",
+                  Verdana, Geneva, sans-serif;
 }
 
 * {
@@ -34,7 +50,7 @@ body {
 }
 
 body {
-  font-family: "Trebuchet MS", Verdana, sans-serif;
+  font-family: var(--font-ui);
   color: var(--text);
   background-color: #120e0c;
   background:
@@ -64,6 +80,37 @@ body {
   border-radius: 18px;
   box-shadow: 0 18px 50px var(--shadow);
   backdrop-filter: blur(10px);
+}
+
+/* The cell popup. It shares .panel with the sidebar cards, so the frame
+   treatment has to undo .panel's own border, radius and blur rather than just
+   add to them. Rather than restyle every descendant for parchment, the theme
+   variables are redefined on the panel itself and cascade: .details-content,
+   the stat rows and the alliance labels all resolve var(--text) / var(--muted)
+   against these instead of the dark-theme values. */
+.details-panel.game-frame {
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  /* Rails reach ~15px in, so 20px keeps content off them; the corners still
+     overlap, which is how the game's own popups sit. */
+  padding: 20px;
+  /* Measured against the #DBB37A parchment: text 5.86:1, muted 4.93:1,
+     accent 4.59:1, danger 5.15:1. The first pass had muted at 3.20:1 and
+     danger at 4.23:1, both under AA, and muted is what .details-content
+     renders in - the popup's main body copy. */
+  --text: #543201;
+  --muted: #5c3f18;
+  --accent: #6b3f0a;
+  --accent-strong: #4a2c05;
+  --panel-border: rgba(84, 50, 1, 0.28);
+  --panel-strong: rgba(84, 50, 1, 0.4);
+  --danger: #7a2410;
+  --shadow: rgba(84, 50, 1, 0.25);
+  color: var(--text);
 }
 
 .brand-panel,
@@ -124,6 +171,238 @@ body {
     rgba(14, 12, 10, 0.26);
 }
 
+/* ── BYM popup frame (frame2) ───────────────────────────────────────────
+   Not a 9-slice. frame2.Setup() in the client lays the eight pieces out by
+   hand relative to the panel box, and the corners deliberately overhang the
+   rails and overlap the panel rather than ringing it:
+
+     topLeft      (x - 11,          y - 10)
+     topRight     (x + w - 55,      y - 9)
+     bottomLeft   (x - 12,          y + h - 54)
+     bottomRight  (x + w - 57,      y + h - 50)
+     fillerTop    (x + 56,  y - 7)        width  = w - 105
+     fillerBottom (x + 40,  y + h - 11)   width  = w - 90
+     fillerLeft   (x - 8,   y + 50)       height = h - 100
+     fillerRight  (x + w - 16, y + 50)    height = h - 95
+
+   border-image cannot express that: it would stretch the 22px rails to the
+   corner height and pull every corner flush to the edge. So the frame is an
+   overlay pseudo-element inset by the overhang (-10 / -11 / -16 / -12), with
+   the eight pieces as background layers positioned inside it. The rails are
+   stretched, not tiled, because the game assigns .width / .height directly.
+
+   Layer order is the reverse of the game's addChild order, since the first
+   background listed paints on top. */
+
+/* ── Frame corner buttons ───────────────────────────────────────────────
+   frame2.Setup() places these against the panel box, not the header:
+
+     buttonClose  (x + width - 20, y - 10)     27 x 27
+     buttonHelp   (x + width - 48, y - 11)     27 x 27
+
+   Read from the panel's right edge that is right: -7px and right: 21px, and
+   both scale with --fs like the rest of the frame. z-index 4 puts them over
+   the frame (1), content (2) and the resize grips (3) - the north-east grip
+   occupies the same corner, and the button has to win inside its 27px. */
+.game-frame > .frame-button-close,
+.game-frame > .frame-button-alt {
+  position: absolute;
+  z-index: 4;
+  width: calc(27px * var(--fs));
+  height: calc(27px * var(--fs));
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  box-shadow: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  color: transparent;
+  text-indent: -9999px;
+  overflow: hidden;
+  transform-origin: center;
+  transition: transform 90ms ease;
+}
+
+.game-frame > .frame-button-close {
+  top: calc(-10px * var(--fs));
+  right: calc(-7px * var(--fs));
+  background-image: url("/assets/ui/button_close.png");
+}
+
+.game-frame > .frame-button-alt {
+  /* Always on screen while a yard is open - it toggles between the default
+     size and a corner thumbnail, so hiding it at the default made the
+     shrink direction unreachable. */
+  display: block;
+  top: calc(-11px * var(--fs));
+  right: calc(21px * var(--fs));
+  /* The frame family's own fullscreen glyph, so the pair reads as one set. */
+  background-image: url("/assets/ui/button_fullscreen.png");
+}
+
+.game-frame > .frame-button-close:hover,
+.game-frame > .frame-button-alt:hover,
+.game-frame > .frame-button-close:focus-visible,
+.game-frame > .frame-button-alt:focus-visible {
+  background-color: transparent;
+  /* Grow 10% rather than tint: these sit on the carved rail, where a colour
+     wash reads as damage to the frame. */
+  transform: scale(1.1);
+}
+
+/* The art is 27px, and 16px once --fs drops to 0.6 on a phone. Expand the hit
+   area without touching the sprite, the same way the outposts button does. */
+@media (pointer: coarse) {
+  .game-frame > .frame-button-close::after,
+  .game-frame > .frame-button-alt::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* ── MapRoom 2 window frame (frame1) ────────────────────────────────────
+   MapRoomPopup_CLIP is the only clip in the client that uses frame1_CLIP,
+   and it configures it as mcFrame.Setup(true, true, true, 0, 0) - close,
+   help and fullscreen, no title or footer plate. Here the help button is
+   dropped, which is the Setup(true, false, true, ...) case: the client
+   itself slides fullscreen into the help slot at width - 50.
+
+   frame1.Setup, verbatim, relative to the panel box:
+
+     topLeft      (x - 12,        y - 10)          54 x 182
+     topRight     (x + w - 113,   y - 8)          123 x 58
+     bottomLeft   (x - 8,         y + h - 49)      93 x 64
+     bottomRight  (x + w - 100,   y + h - 146)    112 x 158
+     fillerTop    (x + 42,  y - 5)        width  = w - 153
+     fillerBottom (x + 50,  y + h - 10)   width  = w - 100
+     fillerLeft   (x - 4,   y + 172)      height = h - 219
+     fillerRight  (x + w - 14, y + 39)    height = h - 158
+
+   The client drops the left rail entirely below 219px tall and the right
+   below 216px; here those calc() heights go negative and the layer stops
+   painting, which comes out the same.
+
+   frame1 ships no background of its own - the map room draws the world
+   underneath it - so frame2's parchment tile is carried over, inset 10px so
+   the rails cover the seam. */
+.game-frame.frame-mr2::before {
+  inset: calc(-10px * var(--fs)) calc(-12px * var(--fs))
+         calc(-15px * var(--fs)) calc(-12px * var(--fs));
+  background-image:
+    url("/assets/ui/frame1/top_right.png"),
+    url("/assets/ui/frame1/top_left.png"),
+    url("/assets/ui/frame1/bottom_right.png"),
+    url("/assets/ui/frame1/bottom_left.png"),
+    url("/assets/ui/frame1/filler_bottom.png"),
+    url("/assets/ui/frame1/filler_right.png"),
+    url("/assets/ui/frame1/filler_left.png"),
+    url("/assets/ui/frame1/filler_top.png"),
+    linear-gradient(#dbb37a, #dbb37a);
+  background-position:
+    right calc(2px * var(--fs)) top calc(2px * var(--fs)),
+    left 0 top 0,
+    right 0 bottom calc(3px * var(--fs)),
+    left calc(4px * var(--fs)) bottom 0,
+    left calc(62px * var(--fs)) bottom calc(8px * var(--fs)),
+    right calc(6px * var(--fs)) top calc(49px * var(--fs)),
+    left calc(8px * var(--fs)) top calc(182px * var(--fs)),
+    left calc(54px * var(--fs)) top calc(5px * var(--fs)),
+    left calc(22px * var(--fs)) top calc(20px * var(--fs));
+  background-size:
+    calc(123px * var(--fs)) calc(58px * var(--fs)),
+    calc(54px * var(--fs)) calc(182px * var(--fs)),
+    calc(112px * var(--fs)) calc(158px * var(--fs)),
+    calc(93px * var(--fs)) calc(64px * var(--fs)),
+    calc(100% - 124px * var(--fs)) calc(17px * var(--fs)),
+    calc(20px * var(--fs)) calc(100% - 183px * var(--fs)),
+    calc(16px * var(--fs)) calc(100% - 244px * var(--fs)),
+    calc(100% - 177px * var(--fs)) calc(21px * var(--fs)),
+    calc(100% - 44px * var(--fs)) calc(100% - 45px * var(--fs));
+}
+
+/* frame1 puts both buttons on one line at y - 7, and with no help button the
+   client slides fullscreen into the help slot. */
+.game-frame.frame-mr2 > .frame-button-close {
+  top: calc(-7px * var(--fs));
+  right: calc(-7px * var(--fs));
+  background-image: url("/assets/ui/button_close_frame1.png");
+}
+
+.game-frame.frame-mr2 > .frame-button-alt {
+  top: calc(-7px * var(--fs));
+  right: calc(23px * var(--fs));
+}
+
+.game-frame {
+  /* Frame scale. Every offset and size below is multiplied by it, so a single
+     override reskins the frame for a smaller surface. The pieces are
+     fixed-size in game; at 1 the two top corners are 134px, which is 38% of a
+     390px phone. */
+  --fs: 1;
+}
+
+.game-frame::before {
+  content: "";
+  position: absolute;
+  inset: calc(-10px * var(--fs)) calc(-11px * var(--fs))
+         calc(-16px * var(--fs)) calc(-12px * var(--fs));
+  pointer-events: none;
+  z-index: 1;
+  background-image:
+    url("/assets/ui/frame2/top_right.png"),
+    url("/assets/ui/frame2/top_left.png"),
+    url("/assets/ui/frame2/bottom_right.png"),
+    url("/assets/ui/frame2/bottom_left.png"),
+    url("/assets/ui/frame2/filler_bottom.png"),
+    url("/assets/ui/frame2/filler_right.png"),
+    url("/assets/ui/frame2/filler_left.png"),
+    url("/assets/ui/frame2/filler_top.png"),
+    /* frame2_background: a flat #DBB37A tile the game stretches across
+       (x + 10, y + 10, w - 20, h - 20). Last in the list, so it sits under
+       the rails and corners - the frame draws its own panel fill, which is
+       why the popups no longer set a background of their own. */
+    linear-gradient(#dbb37a, #dbb37a);
+  background-repeat: no-repeat;
+  background-position:
+    right 0 top calc(1px * var(--fs)),
+    left calc(1px * var(--fs)) top 0,
+    right 0 bottom 0,
+    left 0 bottom calc(1px * var(--fs)),
+    left calc(52px * var(--fs)) bottom calc(4px * var(--fs)),
+    right calc(3px * var(--fs)) top calc(60px * var(--fs)),
+    left calc(4px * var(--fs)) top calc(60px * var(--fs)),
+    left calc(68px * var(--fs)) top calc(3px * var(--fs)),
+    left calc(22px * var(--fs)) top calc(20px * var(--fs));
+  background-size:
+    calc(66px * var(--fs)) calc(65px * var(--fs)),
+    calc(68px * var(--fs)) calc(63px * var(--fs)),
+    calc(68px * var(--fs)) calc(66px * var(--fs)),
+    calc(64px * var(--fs)) calc(69px * var(--fs)),
+    calc(100% - 113px * var(--fs)) calc(23px * var(--fs)),
+    calc(24px * var(--fs)) calc(100% - 121px * var(--fs)),
+    calc(22px * var(--fs)) calc(100% - 126px * var(--fs)),
+    calc(100% - 128px * var(--fs)) calc(22px * var(--fs)),
+    calc(100% - 43px * var(--fs)) calc(100% - 46px * var(--fs));
+}
+
+/* Content sits above the frame; the rails are only ~25px thick but the
+   corners reach ~57px in, so anything in a corner would be covered. */
+.game-frame > * {
+  position: relative;
+  z-index: 2;
+}
+
 .map-overlay-card {
   position: relative;
   display: flex;
@@ -181,6 +460,7 @@ body {
 
 .eyebrow {
   margin: 0 0 6px;
+  font-family: var(--font-display);
   text-transform: uppercase;
   letter-spacing: 0.18em;
   font-size: 11px;
@@ -194,11 +474,13 @@ p {
 }
 
 h1 {
+  font-family: var(--font-display);
   font-size: 30px;
   line-height: 1.05;
 }
 
 h2 {
+  font-family: var(--font-display);
   font-size: 20px;
   line-height: 1.1;
 }
@@ -738,8 +1020,6 @@ h2 {
   font-size: 12px;
 }
 
-.primary-button,
-.secondary-button,
 .icon-button {
   border: 0;
   border-radius: 10px;
@@ -748,26 +1028,89 @@ h2 {
   touch-action: manipulation;
 }
 
+/* Colours are set explicitly rather than through var(--text): the cell popup
+   redefines those to dark browns for parchment, which would be unreadable on
+   the stone. */
+.primary-button,
+.secondary-button {
+  appearance: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  /* Inherits the page face, which is Verdana - the same font Button.as sets
+     on the game's own button labels (_format.font = "Verdana"). */
+  font: inherit;
+  border-style: solid;
+  border-width: 5px 12px;
+  border-radius: 0;
+  background: none;
+  /* Fallbacks for a failed image load: without them border-style:solid with
+     no border-color paints a 12px slab in currentColor around a transparent
+     button.
+
+     background-clip is the important half. The art has fully transparent
+     corners - 28 of the 60 pixels in stone_hover's corner slice are alpha 0 -
+     and a background-color painting to the border box by default showed
+     straight through them as grey squares. Clipping to the padding box keeps
+     the fallback behind the opaque middle slice, where it is invisible until
+     the image actually fails. */
+  background-color: #8c9290;
+  background-clip: padding-box;
+  border-color: #3a332b;
+  transition: filter 110ms ease, transform 60ms ease;
+}
+
 .primary-button {
-  background: linear-gradient(180deg, var(--accent-strong), var(--accent));
-  color: #24160a;
   font-weight: 700;
-  padding: 11px 14px;
+  padding: 11px 16px;
+  border-image: url("/assets/ui/button/stone_hover.png") 5 12 fill round;
+  color: #f7ecd8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.primary-button:hover:not(:disabled),
+.primary-button:focus-visible:not(:disabled) {
+  filter: brightness(1.12);
 }
 
 .secondary-button {
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--text);
-  padding: 9px 12px;
+  padding: 10px 14px;
+  border-image: url("/assets/ui/button/stone.png") 5 12 fill round;
+  color: #241f19;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
-.map-controls {
-  position: absolute;
-  right: 18px;
-  bottom: 18px;
-  display: flex;
-  gap: 8px;
-  z-index: 2;
+.secondary-button:hover:not(:disabled),
+.secondary-button:focus-visible:not(:disabled) {
+  border-image-source: url("/assets/ui/button/stone_hover.png");
+  color: #f7ecd8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+/* Focus has to be distinguishable from hover, which swaps to the same art.
+   The ring sits outside the border box so it never fights the frame. */
+.primary-button:focus-visible,
+.secondary-button:focus-visible,
+.tb-button:focus-visible {
+  outline: 2px solid #f2c76b;
+  outline-offset: 2px;
+}
+
+.primary-button:active:not(:disabled),
+.secondary-button:active:not(:disabled) {
+  filter: brightness(0.9);
+  transform: translateY(1px);
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: default;
+  /* Flatten rather than darken. brightness(0.72) took the stone to ~#686868,
+     where the old #5d574e label sat at 1.27:1 - invisible. Washing the
+     contrast out reads as "dead" while keeping the face light enough for a
+     dark label (4.88:1). */
+  filter: grayscale(1) contrast(0.6) brightness(1.04);
+  color: #262119;
+  text-shadow: none;
 }
 
 .icon-button {
@@ -777,113 +1120,6 @@ h2 {
   color: var(--text);
   font-size: 24px;
   line-height: 1;
-}
-
-.map-control-button {
-  position: relative;
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
-  background: rgba(14, 12, 10, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
-}
-
-.map-control-button::before,
-.map-control-button::after {
-  position: absolute;
-  left: 50%;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease, transform 120ms ease;
-}
-
-.map-control-button::before {
-  content: attr(data-tooltip);
-  bottom: calc(100% + 12px);
-  transform: translate(-50%, 6px);
-  padding: 7px 10px;
-  border-radius: 10px;
-  background: rgba(20, 16, 12, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.map-control-button::after {
-  content: "";
-  bottom: calc(100% + 4px);
-  transform: translate(-50%, 6px);
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 7px solid rgba(20, 16, 12, 0.94);
-}
-
-.map-control-button:hover::before,
-.map-control-button:hover::after,
-.map-control-button:focus-visible::before,
-.map-control-button:focus-visible::after {
-  opacity: 1;
-  transform: translate(-50%, 0);
-}
-
-.map-control-button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.map-control-button svg {
-  width: 22px;
-  height: 22px;
-  fill: currentColor;
-  display: block;
-  margin: 0 auto;
-}
-
-.map-control-button.loading svg {
-  animation: map-control-spin 1s linear infinite;
-}
-
-.map-control-cooldown {
-  position: absolute;
-  left: 50%;
-  bottom: -6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: rgba(242, 199, 107, 0.94);
-  color: #24160a;
-  opacity: 0;
-  font-size: 11px;
-  font-weight: 700;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
-  pointer-events: none;
-  transform: translate(-50%, 4px) scale(0.9);
-  transition: opacity 120ms ease, transform 120ms ease;
-  z-index: 1;
-}
-
-.map-control-button.cooling-down:hover .map-control-cooldown,
-.map-control-button.cooling-down:focus-visible .map-control-cooldown {
-  opacity: 1;
-  transform: translate(-50%, 0) scale(1);
-}
-
-@keyframes map-control-spin {
-  from {
-    transform: rotate(0deg);
-  }
-
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .world-list,
@@ -1481,8 +1717,12 @@ h2 {
   gap: 12px;
 }
 
+/* var(--accent), not a fixed gold: the cell popup redefines the palette for
+   its parchment background, and #e9c98a measured 1.23:1 against it - which is
+   why wild monster cells, the ones that use this label/value grid rather than
+   the owner card, were the hardest to read. */
 .detail-label {
-  color: #e9c98a;
+  color: var(--accent);
 }
 
 @media (max-width: 1000px) and (min-width: 901px) {
@@ -1685,12 +1925,6 @@ h2 {
     transform-origin: top right;
   }
 
-  .map-control-button::before,
-  .map-control-button::after,
-  .map-coordinates {
-    display: none !important;
-  }
-
   .map-search-panel .search-input {
     height: 48px;
     padding-top: 0;
@@ -1724,13 +1958,26 @@ h2 {
     max-width: calc(100% - 36px);
   }
 
-  .map-controls {
-    right: 16px;
-    bottom: 16px;
-  }
-
-  .map-control-button {
-    transition: opacity 160ms ease, transform 180ms ease;
+  /* Framed to match the desktop cell popup: same parchment, same variable
+     overrides, same art at 55% so an ornate frame does not swallow a
+     366px-wide sheet. overflow has to go visible for the overhang - the
+     reveal is carried by the slide and fade, not the height clip. */
+  .mobile-details-sheet.game-frame {
+    --fs: 0.55;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    backdrop-filter: none;
+    overflow: visible;
+    --text: #543201;
+    --muted: #5c3f18;
+    --accent: #6b3f0a;
+    --accent-strong: #4a2c05;
+    --panel-border: rgba(84, 50, 1, 0.28);
+    --panel-strong: rgba(84, 50, 1, 0.4);
+    --danger: #7a2410;
+    color: var(--text);
   }
 
   .mobile-details-sheet {
@@ -1740,12 +1987,19 @@ h2 {
     bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     display: block;
     overflow: hidden;
-    padding: 14px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
     z-index: 4;
     opacity: 0;
     pointer-events: none;
+    /* Closed, this sheet is only opacity 0 - it is still laid out, so its
+       close button stayed in the tab order and could be focused while
+       invisible, inside an aria-hidden subtree. visibility takes it out of
+       the tab order; delaying it until the slide finishes keeps the
+       animation. */
+    visibility: hidden;
     transform: translateY(calc(100% + 24px));
-    transition: opacity 180ms ease, transform 220ms ease, height 220ms ease;
+    transition: opacity 180ms ease, transform 220ms ease, height 220ms ease,
+                visibility 0s linear 220ms;
   }
 
   /* The header no longer carries a visible title, so it collapses to just
@@ -1774,10 +2028,12 @@ h2 {
   #app.mobile-details-open .mobile-details-sheet {
     opacity: 1;
     pointer-events: auto;
+    visibility: visible;
     transform: translateY(0);
+    transition: opacity 180ms ease, transform 220ms ease, height 220ms ease,
+                visibility 0s;
   }
 
-  #app.mobile-details-open #refresh-button,
   #app.mobile-details-open #find-home-button {
     opacity: 0;
     pointer-events: none;
@@ -1789,7 +2045,6 @@ h2 {
     display: none;
   }
 }
-
 
 /* --- Navigate / bookmarks / highlights panels --- */
 .jump-row {
@@ -1938,7 +2193,6 @@ h2 {
 .highlight-label-red {
   color: #ff5c4a;
 }
-
 
 /* --- Measure tool --- */
 .measure-button {
@@ -2143,6 +2397,9 @@ h2 {
    supersede the old sidebar / floating-panel layout.
    ===================================================================== */
 
+/* Overrides the base #app above (line ~45): the flex column and
+   overflow only apply once the map shell exists. Source order is
+   load-bearing here - both rules have equal specificity. */
 #app {
   display: flex;
   flex-direction: column;
@@ -2243,30 +2500,56 @@ h2 {
 
 .tb-button {
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-  font: 600 12.5px/1 "Segoe UI", sans-serif;
-  padding: 6px 10px;
+  border-style: solid;
+  border-width: 5px 12px;
+  border-image: url("/assets/ui/button/stone.png") 5 12 fill round;
+  border-radius: 0;
+  background: none;
+  /* Fallbacks for a failed image load: without them border-style:solid with
+     no border-color paints a 12px slab in currentColor around a transparent
+     button.
+
+     background-clip is the important half. The art has fully transparent
+     corners - 28 of the 60 pixels in stone_hover's corner slice are alpha 0 -
+     and a background-color painting to the border box by default showed
+     straight through them as grey squares. Clipping to the padding box keeps
+     the fallback behind the opaque middle slice, where it is invisible until
+     the image actually fails. */
+  background-color: #8c9290;
+  background-clip: padding-box;
+  border-color: #3a332b;
+  color: #241f19;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+  /* Original face and size; only the weight moves, for legibility against
+     the textured button. */
+  font: 700 12.5px/1 var(--font-ui);
+  padding: 7px 12px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: filter 110ms ease;
 }
 
-.tb-button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
+.tb-button:hover:not(:disabled),
+.tb-button:focus-visible:not(:disabled) {
+  border-image-source: url("/assets/ui/button/stone_hover.png");
+  color: #f7ecd8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
 }
 
 .tb-button:disabled {
-  opacity: 0.45;
+  filter: grayscale(1) contrast(0.6) brightness(1.04);
+  color: #262119;
+  text-shadow: none;
   cursor: default;
 }
 
+/* Open or active toolbar items hold the hover art, so the strip shows which
+   menu is down without a second colour. */
 .tb-button.active,
 .tb-item.open > .tb-button {
-  background: rgba(242, 199, 107, 0.22);
-  border-color: rgba(242, 199, 107, 0.55);
+  border-image-source: url("/assets/ui/button/stone_hover.png");
+  color: #f7ecd8;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
 }
 
 .tb-icon-button {
@@ -2427,6 +2710,8 @@ h2 {
 }
 
 /* Session menu */
+/* Overrides the base .session-header above (align-items, gap). Equal
+   specificity, so this must stay after it. */
 .session-header {
   display: flex;
   align-items: center;
@@ -2439,12 +2724,16 @@ h2 {
   display: none;
 }
 
+/* Overrides the base .credits-copy above (font-size 13 -> 11). Equal
+   specificity, so this must stay after it. */
 .credits-copy {
   margin-top: 12px;
   font-size: 11px;
 }
 
 /* Details card floats over the map, top-right */
+/* Overrides the base .map-shell above: padding 18px -> 0 and flex ->
+   block. Equal specificity, so this must stay after it. */
 .map-shell {
   flex: 1;
   min-height: 0;
@@ -2457,12 +2746,6 @@ h2 {
   width: 100%;
   height: 100%;
   border-radius: 0;
-}
-
-#map-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
 }
 
 .map-panel .details-panel {
@@ -2482,10 +2765,25 @@ h2 {
   display: block;
 }
 
+/* Framed: the panel has to stop clipping so the frame can overhang, which
+   means the scroll moves inside to the content. Flex column so the content
+   still gets the leftover height under the panel's max-height. */
+.map-panel .details-panel.game-frame.open {
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+}
+
+.map-panel .details-panel.game-frame .details-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Positioned by the frame slot rules above; the old top/right 8px put it
+   inside the panel instead of on the frame. */
 .details-close-button {
   position: absolute;
-  top: 8px;
-  right: 8px;
   z-index: 2;
 }
 
@@ -2518,10 +2816,6 @@ h2 {
   margin-bottom: 8px;
 }
 
-.bookmark-eyebrow {
-  margin-top: 16px;
-}
-
 /* Mobile: toolbar scrolls horizontally; menus become full-width sheets */
 @media (max-width: 900px) {
   .toolbar {
@@ -2544,7 +2838,10 @@ h2 {
   }
 
   .map-panel .details-panel,
-  .map-panel .details-panel.open {
+  .map-panel .details-panel.open,
+  /* Has to match the framed rule's specificity or the desktop popup would
+     reappear on phones, where the bottom sheet is used instead. */
+  .map-panel .details-panel.game-frame.open {
     display: none;
   }
 }
@@ -2681,19 +2978,6 @@ h2 {
   cursor: default;
 }
 
-.corner-button .map-control-cooldown {
-  bottom: auto;
-  top: 50%;
-  left: -8px;
-  transform: translate(-100%, -50%) scale(0.9);
-}
-
-.corner-button.cooling-down:hover .map-control-cooldown,
-.corner-button.cooling-down:focus-visible .map-control-cooldown {
-  opacity: 1;
-  transform: translate(-100%, -50%) scale(1);
-}
-
 .corner-button:hover {
   background: rgba(58, 45, 30, 0.95);
 }
@@ -2783,7 +3067,6 @@ select option {
   color: var(--text);
 }
 
-
 /* Alliance roster formatting */
 .alliance-identity-name.enemy-name {
   color: #ff8d7d;
@@ -2819,7 +3102,6 @@ select option {
   cursor: default;
 }
 
-
 /* Base viewer popup (View Yard / View Outpost) */
 /* The base viewer floats over the map rather than blocking it: no dimming,
    and pointer events pass straight through the backdrop so the map behind
@@ -2849,10 +3131,19 @@ select option {
   min-height: 260px;
   display: flex;
   flex-direction: column;
-  border-radius: 14px;
-  overflow: hidden;
+  /* overflow stays visible so the frame overlay can overhang; the canvas is
+     clipped by .base-view-canvas-shell instead. */
+  overflow: visible;
+  /* The frame sits behind content, as it does in game. The rails reach 15px
+     into the panel (top +15, left +14, right -16, bottom -11), so the header
+     and canvas are inset past them - otherwise an opaque header would cover
+     the inner two thirds of the top rail. The corners still overlap the
+     header's own corners, which is the intended look. */
+  padding: 16px;
+  /* Fallback only: the frame paints #DBB37A over this whole area, so what
+     shows is the 16px mat around the header and canvas. This is what is left
+     if the frame images fail to load. */
   background: #101c10;
-  border: 1px solid rgba(255, 255, 255, 0.16);
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.6);
 }
 
@@ -2875,6 +3166,10 @@ select option {
   .base-view-window {
     min-width: 0;
     min-height: 0;
+    /* At full size the two top corners are 134px, roughly 38% of a 390px
+       phone, sitting over the title and close button. */
+    --fs: 0.6;
+    padding: 10px;
   }
 
   .base-view-header {
@@ -2890,11 +3185,6 @@ select option {
     white-space: nowrap;
   }
 
-  .base-view-header-buttons {
-    gap: 6px;
-  }
-
-  .base-view-anim-toggle,
   .base-view-reset-layout,
   .base-view-close {
     min-width: 40px;
@@ -2907,7 +3197,6 @@ select option {
   }
 }
 
-.base-view-header-buttons,
 .base-view-title {
   cursor: default;
 }
@@ -2935,23 +3224,30 @@ select option {
   cursor: ns-resize;
 }
 
-.base-view-resize[data-dir="e"] { right: 0; }
-.base-view-resize[data-dir="w"] { left: 0; }
-.base-view-resize[data-dir="n"] { top: 0; }
-.base-view-resize[data-dir="s"] { bottom: 0; }
+/* Pushed out to the frame's own edge. The overlay overhangs the window by
+   12/11/10/16px, so grips flush to the window box left a dead band exactly
+   where the carved edge people aim at is drawn. */
+.base-view-resize[data-dir="e"] { right: -12px; width: 20px; }
+.base-view-resize[data-dir="w"] { left: -12px; width: 20px; }
+.base-view-resize[data-dir="n"] { top: -10px; height: 18px; }
+.base-view-resize[data-dir="s"] { bottom: -15px; height: 23px; }
 
 .base-view-resize[data-dir="ne"],
 .base-view-resize[data-dir="nw"],
 .base-view-resize[data-dir="se"],
 .base-view-resize[data-dir="sw"] {
-  width: 16px;
-  height: 16px;
+  width: 28px;
+  height: 28px;
 }
 
-.base-view-resize[data-dir="ne"] { top: 0; right: 0; cursor: nesw-resize; }
-.base-view-resize[data-dir="nw"] { top: 0; left: 0; cursor: nwse-resize; }
-.base-view-resize[data-dir="se"] { bottom: 0; right: 0; cursor: nwse-resize; }
-.base-view-resize[data-dir="sw"] { bottom: 0; left: 0; cursor: nesw-resize; }
+/* Shifted clear of the corner buttons. The close and reset controls now own
+   right -7..48 and top -11..17 at z-index 4, which covered 24 of this grip's
+   28px and left the north-east corner effectively dead. Sitting immediately
+   left of the cluster keeps the diagonal resize reachable. */
+.base-view-resize[data-dir="ne"] { top: -10px; right: 62px; cursor: nesw-resize; }
+.base-view-resize[data-dir="nw"] { top: -10px; left: -12px; cursor: nwse-resize; }
+.base-view-resize[data-dir="se"] { bottom: -15px; right: -12px; cursor: nwse-resize; }
+.base-view-resize[data-dir="sw"] { bottom: -15px; left: -12px; cursor: nesw-resize; }
 
 /* Visible grip in the bottom-right corner */
 .base-view-resize[data-dir="se"]::after {
@@ -2975,7 +3271,6 @@ select option {
 /* Fullscreen-style toggle. Hidden while the window sits at its default
    geometry, so the header stays clean until there is something to reset. */
 .base-view-reset-layout {
-  display: none;
   flex: none;
   width: 30px;
   height: 30px;
@@ -2984,25 +3279,22 @@ select option {
   justify-content: center;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.06);
+  /* The game's own fullscreen glyph. Local copy rather than the /imagecache
+     proxy: these controls were the only chrome left that broke when the CDN
+     was unreachable, and that could serve a different revision than the rest
+     of the themed UI. */
+  background: url("/assets/ui/controls/button_full_screen.png") center / 18px 18px no-repeat,
+              rgba(255, 255, 255, 0.06);
   color: var(--muted);
   cursor: pointer;
 }
 
-.base-view-window.resized .base-view-reset-layout {
-  display: inline-flex;
-}
-
-.base-view-reset-layout svg {
-  width: 15px;
-  height: 15px;
-  fill: currentColor;
-  pointer-events: none;
-}
-
+/* background-color, not the background shorthand: the shorthand resets
+   background-image to none, which wiped the glyph the moment the pointer
+   touched the button. */
 .base-view-reset-layout:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.12);
+  background-color: rgba(255, 255, 255, 0.12);
 }
 
 .base-view-header {
@@ -3044,9 +3336,11 @@ select option {
   touch-action: manipulation;
 }
 
+/* Same trap as above - this shorthand was clearing background-image and
+   making the close glyph disappear on hover. */
 .base-view-close:hover,
 .popup-close:hover {
-  background: rgba(255, 92, 74, 0.25);
+  background-color: rgba(255, 92, 74, 0.25);
   border-color: rgba(255, 92, 74, 0.5);
 }
 
@@ -3054,6 +3348,11 @@ select option {
   position: relative;
   flex: 1;
   min-height: 0;
+  /* Deliberately NOT overflow:hidden. The canvas is position:absolute
+     inset:0, so it already fits exactly and cannot overflow - but the HUD
+     lives in here too and places art at negative offsets (the outposts icon
+     sits at left:-15.5px against a left:10px origin, so it reaches -5.5px).
+     Clipping here silently shaved it. */
 }
 
 .base-view-canvas {
@@ -3067,53 +3366,31 @@ select option {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   padding: 20px;
   text-align: center;
-  color: var(--muted);
+  /* The canvas shell is transparent until the yard paints, so this text sits
+     on the frame's #DBB37A parchment. The dark-theme --muted measured 1.05:1
+     against it. */
+  color: #5c3f18;
   font-size: 14px;
+  /* The retry button inside needs clicks; the wrapper still ignores them so
+     it never blocks panning once the yard has loaded. */
   pointer-events: none;
 }
 
 .base-view-status.error {
-  color: #ff8d7d;
+  color: #7a2410;
 }
 
-
-.base-view-header-buttons {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* ── 1. Retry, shown when a yard fails to load ───────────────────────── */
+.base-view-retry {
+  pointer-events: auto;
+  align-self: center;
 }
-
-.base-view-anim-toggle {
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(242, 199, 107, 0.5);
-  background: rgba(242, 199, 107, 0.18);
-  color: var(--text);
-  font: 600 12px/1 "Segoe UI", sans-serif;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.base-view-anim-toggle.off {
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--muted);
-}
-
-.base-view-anim-toggle:hover {
-  background: rgba(242, 199, 107, 0.3);
-}
-
-.base-view-anim-toggle.off:hover {
-  background: rgba(255, 255, 255, 0.12);
-}
-
 
 /* Kept in the accessibility tree (screen readers announce the selected cell)
    but removed from the visual layout. */
@@ -3148,7 +3425,7 @@ select option {
 .cell-owner-line {
   margin: 0 0 6px;
   text-align: center;
-  font: 700 14px/1.3 "Segoe UI", sans-serif;
+  font: 700 14px/1.3 var(--font-display);
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -3222,4 +3499,613 @@ select option {
 
 .link-button:hover {
   color: var(--text);
+}
+
+/* ── Own-yard HUD ───────────────────────────────────────────────────────
+   Absolute geometry, all of it measured from assets.swf. The container is a
+   zero-size anchor at the game's own HUD origin (screen + 10, 8); every
+   child is positioned from that point exactly as the SWF places it, rather
+   than stacked with flow layout. See base-view.js for the coordinate list. */
+.base-view-hud {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  width: 0;
+  height: 0;
+  z-index: 4;
+  pointer-events: none;
+  transform-origin: top left;
+  font-family: var(--font-display);
+}
+
+.base-view-hud[hidden] { display: none; }
+
+/* ── level plate: mcPoints (0,0), shape 582 rendered at its authored size.
+   Bounds are 0..217 x 0..33 and the export carries FFDec's 1px pad, so it
+   draws at 218 x 34 from the origin. Using the shape render rather than
+   bitmap 581 keeps this consistent with the resource and outposts rows, which
+   also ship as rendered shapes. ── */
+.hud-level {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 218px;
+  height: 34px;
+  background: url("/assets/gameui/level_bar.png") 0 0 / 218px 34px no-repeat;
+}
+
+/* mcBar (14.3, 2.05); shape 553 is 85x23 placed at sy 1.215 -> 27.9px tall.
+   SetPoints assigns .width in pixels, so the fill is sized in px, not %. */
+.hud-level-fill {
+  position: absolute;
+  left: 14.3px;
+  top: 2.05px;
+  height: 27.9px;
+  /* shape 553 is a single solid fill: white at alpha 166/255. */
+  /* shape 553: a plain 85 x 23 rectangle, solid #FFFFFF at alpha 166/255.
+     No rounding, no gradient, no tint - the level bar and the four resource
+     rows all place the identical sprite. */
+  background: rgba(255, 255, 255, 0.651);
+}
+
+/* mcPoints.tName - not an image. TextField 583: fontId 31 at 14px, white,
+   centre-aligned, leading 2, bounds (-2,-2)..(181,21.1) placed at (36, 9.55),
+   so the field occupies 183 x 23.1 at (34, 7.55). It carries the same glow as
+   the resource numbers and sits above mcBar in depth order, painting over the
+   fill and under the star and level number. */
+.hud-level-title {
+  position: absolute;
+  left: 34px;
+  top: 7.55px;
+  width: 183px;
+  height: 23.1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+  /* 1.5px black outline - this is the SWF's own treatment. tR on the resource
+     rows, tR on the outposts row and tName on the level plate all carry the
+     identical GlowFilter(0x000000, alpha 1, blur 2/2, strength 5, quality 2),
+     which at that strength saturates opaque out to the blur radius and reads
+     as roughly a 1.5px hard edge. mcLevel is deliberately excluded: the level
+     number has no filter in the SWF.
+
+     Reproduced as a ring of offset copies rather than -webkit-text-stroke: a
+     stroke is centred on the contour, so it bleeds inwards as well, and inside
+     a counter it closes the hole from every side at once. A shadow paints
+     behind the glyph, which is what GlowFilter does too. */
+  text-shadow:
+    1.50px 0.00px 0 #000,
+    1.30px 0.75px 0 #000,
+    0.75px 1.30px 0 #000,
+    0.00px 1.50px 0 #000,
+    -0.75px 1.30px 0 #000,
+    -1.30px 0.75px 0 #000,
+    -1.50px 0.00px 0 #000,
+    -1.30px -0.75px 0 #000,
+    -0.75px -1.30px 0 #000,
+    -0.00px -1.50px 0 #000,
+    0.75px -1.30px 0 #000,
+    1.30px -0.75px 0 #000,
+    0.80px 0.00px 0 #000,
+    0.57px 0.57px 0 #000,
+    0.00px 0.80px 0 #000,
+    -0.57px 0.57px 0 #000,
+    -0.80px 0.00px 0 #000,
+    -0.57px -0.57px 0 #000,
+    -0.00px -0.80px 0 #000,
+    0.57px -0.57px 0 #000;
+}
+
+/* Star behind the level number: shape 2270 (client/shapes/2270.png, 30 x 28).
+   Its gold body is 23 x 22 within that export; scaling by 32/23 = 1.3913
+   brings it to 32 x 30.6, matching the 32 x 32 body measured off the original
+   screenshot-derived plate. Positioned so the gold lands at plate (2, 1):
+   left = 2 - 3*1.3913, top = 1 - 3*1.3913.
+
+   Note this is not the shape the SWF places - PointsBar_882 and
+   PointsBar_Inferno_898 both use sprite 585 -> shape 584, a square 42 x 42 at
+   (16, 17) scale 0.917. 2270 only appears inside sprite 2272, the map room's
+   level badge. Kept here by preference; shape 584 at 39.43 square with
+   top-left (-1.38, -1.52) is the SWF-accurate alternative. */
+.hud-level-star {
+  position: absolute;
+  left: -2.17px;
+  top: -3.17px;
+  width: 41.74px;
+  height: 38.96px;
+  background: url("/assets/gameui/level_star.png") 0 0 / 100% 100% no-repeat;
+}
+
+/* mcLevel (-1,10): 39 x 26.4 field, 15px centred, #543201. Flash TextFields
+   carry a 2px gutter on every side, hence the padding. */
+.hud-level-num {
+  position: absolute;
+  left: -1px;
+  top: 10px;
+  width: 39px;
+  height: 26.4px;
+  box-sizing: border-box;
+  padding: 2px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  color: #543201;
+}
+
+/* ── resource rows: shape 552, rendered at its authored 136x34 (the shape
+   already bakes in the 1.15395 X stretch of bitmap 551, so nothing is
+   rescaled in CSS and the wood grain stays crisp). ── */
+.hud-row {
+  position: absolute;
+  width: 136px;
+  height: 34px;
+  background: url("/assets/gameui/res_bar.png") 0 0 / 136px 34px no-repeat;
+}
+
+/* mcBar (16,3), 27px tall (23 x 1.174), width in px capped at 90. */
+.hud-fill {
+  position: absolute;
+  left: 16px;
+  top: 3px;
+  height: 27px;
+  /* shape 553: a plain 85 x 23 rectangle, solid #FFFFFF at alpha 166/255.
+     No rounding, no gradient, no tint - the level bar and the four resource
+     rows all place the identical sprite. */
+  background: rgba(255, 255, 255, 0.651);
+}
+
+/* tR (29, 10.25): 12px, white, LEFT aligned, bold via <b> in the htmlText. */
+.hud-num {
+  position: absolute;
+  left: 29px;
+  top: 10.25px;
+  width: 80px;
+  height: 20.4px;
+  box-sizing: border-box;
+  padding: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-align: left;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  /* 1.5px black outline - this is the SWF's own treatment. tR on the resource
+     rows, tR on the outposts row and tName on the level plate all carry the
+     identical GlowFilter(0x000000, alpha 1, blur 2/2, strength 5, quality 2),
+     which at that strength saturates opaque out to the blur radius and reads
+     as roughly a 1.5px hard edge. mcLevel is deliberately excluded: the level
+     number has no filter in the SWF.
+
+     Reproduced as a ring of offset copies rather than -webkit-text-stroke: a
+     stroke is centred on the contour, so it bleeds inwards as well, and inside
+     a counter it closes the hole from every side at once. A shadow paints
+     behind the glyph, which is what GlowFilter does too. */
+  text-shadow:
+    1.50px 0.00px 0 #000,
+    1.30px 0.75px 0 #000,
+    0.75px 1.30px 0 #000,
+    0.00px 1.50px 0 #000,
+    -0.75px 1.30px 0 #000,
+    -1.30px 0.75px 0 #000,
+    -1.50px 0.00px 0 #000,
+    -1.30px -0.75px 0 #000,
+    -0.75px -1.30px 0 #000,
+    -0.00px -1.50px 0 #000,
+    0.75px -1.30px 0 #000,
+    1.30px -0.75px 0 #000,
+    0.80px 0.00px 0 #000,
+    0.57px 0.57px 0 #000,
+    0.00px 0.80px 0 #000,
+    -0.57px 0.57px 0 #000,
+    -0.80px 0.00px 0 #000,
+    -0.57px -0.57px 0 #000,
+    -0.00px -0.80px 0 #000,
+    0.57px -0.57px 0 #000;
+}
+
+/* Icon registration is the row origin; each one overhangs by its own amount,
+   so the offsets are set inline per resource rather than shared. */
+.hud-icon {
+  position: absolute;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+}
+
+/* bAdd (109, 5): the exported button sprite, 20 x 24, complete with its
+   glyph. Bitmap 2989 - the 18x18 art this originally used - belongs to a
+   later UI and was never the resource bar's button. Read-only viewer: drawn
+   for fidelity, not clickable. */
+.hud-plus {
+  position: absolute;
+  left: 109px;
+  top: 5px;
+  width: 20px;
+  height: 24px;
+  background: url("/assets/gameui/btn_add.png") 0 0 / 100% 100% no-repeat;
+  pointer-events: none;
+}
+
+/* ── outposts row: shape 590. Same bitmap 551 as a resource row, but the
+   shape paints a white wash over the plate interior - a horizontal gradient
+   running from fully opaque white at the left edge to nothing by x = 116,
+   inset within the dark frame (y 3..29). It is baked into the shape, so the
+   rendered 136x34 export is used directly rather than reconstructing the
+   gradient in CSS. Bounds start at -0.5, hence the offset. ── */
+.hud-outposts {
+  position: absolute;
+  left: -0.5px;
+  width: 136px;
+  height: 34px;
+  background: url("/assets/gameui/outpost_bar.png") 0 0 / 136px 34px no-repeat;
+}
+
+/* shape 592: bitmap 152 (71x60) at 0.7747 -> 55 x 46.4, offset (-16, -7.3). */
+.hud-outpost-icon {
+  position: absolute;
+  left: -15.5px;
+  top: -7.3px;
+  width: 55px;
+  height: 46.4px;
+  background: url("/assets/gameui/icon_outpost.png") 0 0 / 100% 100% no-repeat;
+  pointer-events: none;
+}
+
+/* tR (30, 10.25), same treatment as a resource number but a wider field. */
+.hud-outpost-count {
+  position: absolute;
+  left: 30.5px;
+  top: 10.25px;
+  width: 97px;
+  height: 20.4px;
+  box-sizing: border-box;
+  padding: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  /* 1.5px black outline - this is the SWF's own treatment. tR on the resource
+     rows, tR on the outposts row and tName on the level plate all carry the
+     identical GlowFilter(0x000000, alpha 1, blur 2/2, strength 5, quality 2),
+     which at that strength saturates opaque out to the blur radius and reads
+     as roughly a 1.5px hard edge. mcLevel is deliberately excluded: the level
+     number has no filter in the SWF.
+
+     Reproduced as a ring of offset copies rather than -webkit-text-stroke: a
+     stroke is centred on the contour, so it bleeds inwards as well, and inside
+     a counter it closes the hole from every side at once. A shadow paints
+     behind the glyph, which is what GlowFilter does too. */
+  text-shadow:
+    1.50px 0.00px 0 #000,
+    1.30px 0.75px 0 #000,
+    0.75px 1.30px 0 #000,
+    0.00px 1.50px 0 #000,
+    -0.75px 1.30px 0 #000,
+    -1.30px 0.75px 0 #000,
+    -1.50px 0.00px 0 #000,
+    -1.30px -0.75px 0 #000,
+    -0.75px -1.30px 0 #000,
+    -0.00px -1.50px 0 #000,
+    0.75px -1.30px 0 #000,
+    1.30px -0.75px 0 #000,
+    0.80px 0.00px 0 #000,
+    0.57px 0.57px 0 #000,
+    0.00px 0.80px 0 #000,
+    -0.57px 0.57px 0 #000,
+    -0.80px 0.00px 0 #000,
+    -0.57px -0.57px 0 #000,
+    -0.00px -0.80px 0 #000,
+    0.57px -0.57px 0 #000;
+}
+
+/* ── Base picker ────────────────────────────────────────────────────────
+   Opens from the right edge of the outposts row and runs down to the bottom
+   of the yard viewer; sizeBasePicker() promotes it to the viewer's full
+   height when the list would not fit in that span. 464px wide - twice the
+   original - to carry three columns without the type or kit wrapping. */
+.hud-base-menu {
+  position: absolute;
+  left: 100%;
+  top: 0;
+  z-index: 6;
+  width: 464px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-left: 6px;
+  padding: 0;
+  background: #241a10;
+  border: 1px solid rgba(242, 199, 107, 0.35);
+  border-radius: 8px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+  overflow: hidden;
+}
+
+/* Header and rows share one column template so they stay aligned. */
+.hud-base-head,
+.hud-base-item {
+  display: grid;
+  grid-template-columns: 1fr 130px 92px;
+  gap: 12px;
+  align-items: baseline;
+  padding: 7px 12px;
+  text-align: left;
+}
+
+.hud-base-head {
+  flex: none;
+  border-bottom: 1px solid rgba(242, 199, 107, 0.25);
+  color: #c7bda7;
+  font: 700 10.5px/1.3 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.hud-base-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+}
+
+.hud-base-item {
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: #efe8da;
+  font: 12px/1.3 var(--font-ui);
+  cursor: pointer;
+}
+
+.hud-base-item > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-base-item > span:nth-child(2),
+.hud-base-item > span:nth-child(3) {
+  font-variant-numeric: tabular-nums;
+  color: #b9a88a;
+}
+
+.hud-base-item:hover,
+.hud-base-item:focus-visible {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* The base currently open. Also what the list scrolls to on open. */
+.hud-base-item.current {
+  background: rgba(242, 199, 107, 0.22);
+  color: #ffdc91;
+  font-weight: 700;
+}
+
+.hud-base-item.current > span {
+  color: inherit;
+}
+
+/* bNext (114,16) draws bitmap 593 (30x25) at (-15,-12.5) -> (99, 3.5). The
+   arrow is its own layer, so a player with no outposts gets a visibly dead
+   button instead of a lit one that does nothing. */
+.hud-next-outpost {
+  position: absolute;
+  left: 99.5px;
+  top: 3.5px;
+  width: 30px;
+  height: 25px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: url("/assets/gameui/icon_next.png") 0 0 / 100% 100% no-repeat;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+/* The art is 30x25, and the HUD is scale(0.8) on touch, so the visible
+   button lands at 24x20. This expands the hit area to ~44px without
+   touching the sprite. */
+.hud-next-outpost::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+.hud-next-outpost:hover:not(:disabled) { filter: brightness(1.2); }
+
+/* Disabled still has to read as a button that is present - the previous
+   grayscale + 0.55 brightness dropped the arrow to roughly the plate's own
+   luminance and it disappeared. */
+.hud-next-outpost:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── visitor HUD: UI_TOP frame "view" (sprite 673) ──────────────────────
+   Three layers and nothing else: the level plate, the owner's picture, and
+   a frame over it. mcPic sits at (-5,-5) scaled 0.9, so its 50x50 content
+   renders 45 square; shape 671 frames it a pixel further out at (-6,-6),
+   47 square. The pair covers the star and level number completely, which is
+   why the game never drives either in view mode. */
+.hud-visitor-pic {
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  width: 45px;
+  height: 45px;
+  /* shape 669, the dark plate the avatar loads on top of. */
+  background: url("/assets/gameui/pic_backing.png") 0 0 / 100% 100% no-repeat;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hud-visitor-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.hud-visitor-frame {
+  position: absolute;
+  left: -6px;
+  top: -6px;
+  width: 48px;
+  height: 48px;
+  background: url("/assets/gameui/pic_frame.png") 0 0 / 100% 100% no-repeat;
+  pointer-events: none;
+}
+
+/* Honour the OS "reduce motion" setting. Transitions and animations are
+   decoration here - nothing in the UI depends on one completing - so they are
+   collapsed rather than removed, which keeps transitionend handlers firing. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* No -webkit-text-stroke here, deliberately. A stroke is centred on the glyph
+   contour, so a 3px stroke bleeds 1.5px INWARDS as well as outwards - and
+   inside a counter (the hole in 0, 6, 8, 9, 4) it bleeds in from every side at
+   once, closing a 3px gap completely. paint-order: stroke fill does not save
+   it: the fill repaints the glyph body, not the hole. At 12-14px those digits
+   turned into blobs.
+
+   The shadow ring below is what the SWF actually does anyway - GlowFilter
+   paints behind the glyph, so it can never eat into a counter. */
+
+@media (max-width: 860px), (pointer: coarse) {
+  .base-view-hud { transform: scale(0.8); }
+}
+
+/* ── Game UI skin ───────────────────────────────────────────────────────
+   Real Backyard Monsters art in place of the CSS-drawn stand-ins. The ?, +,
+   - and x controls all share one size (27px, the native size of the frame
+   button art) so the corner cluster reads as a set. */
+
+@font-face {
+  /* GROBOLD is the game's display face - the heavy rounded lettering used
+     for headings and HUD numbers. */
+  font-family: "Groboldov";
+  src: url("/assets/fonts/groboldov-bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Grobold";
+  src: url("/assets/fonts/grobold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* The client's own stacks name "GROBOLDpro" and "GROBOLD" - the families
+   embedded in the SWF alongside Groboldov. Aliasing them onto the bundled
+   files means those stacks resolve here instead of falling through to Comic
+   Sans, which is what the yard canvas has been doing. */
+@font-face {
+  font-family: "GROBOLD";
+  src: url("/assets/fonts/grobold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "GROBOLDpro";
+  src: url("/assets/fonts/groboldov-bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* One shared size and treatment for the four icon buttons. */
+#zoom-in-button,
+#zoom-out-button,
+#help-button,
+.base-view-close,
+.popup-close {
+  /* 27px: the native size of the frame button art (? and x), with the CDN
+     zoom art scaled to match so the corner cluster reads as one set. */
+  width: 27px;
+  height: 27px;
+  min-width: 27px;
+  min-height: 27px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  cursor: pointer;
+  touch-action: manipulation;
+  /* Keep the text glyph as a fallback but out of sight: if art fails to load
+     the control is still there rather than an invisible hit area. */
+  color: transparent;
+  text-indent: -9999px;
+  overflow: hidden;
+}
+
+/* Zoom controls (worldmap/hud/options), now shipped locally - the
+   path must include the assets/ segment, which the proxy does not add. */
+#zoom-in-button  { background-image: url("/assets/ui/controls/button_zoom_in.png"); }
+#zoom-out-button { background-image: url("/assets/ui/controls/button_zoom_out.png"); }
+#help-button     { background-image: url("/assets/ui/button_help.png"); }
+
+.base-view-close,
+.popup-close { background-image: url("/assets/ui/button_close.png"); }
+
+#zoom-in-button:hover,
+#zoom-out-button:hover,
+#help-button:hover,
+.base-view-close:hover,
+.popup-close:hover {
+  background-color: transparent;
+  filter: brightness(1.15);
+}
+
+/* The base viewer's reset control keeps the game's fullscreen glyph. */
+
+/* Touch: keep the art at its native 27px but pad the hit area out to a
+   comfortable target, rather than scaling the sprites up and softening them. */
+@media (max-width: 900px), (pointer: coarse) {
+  #zoom-in-button,
+  #zoom-out-button,
+  #help-button,
+  .base-view-close,
+  .popup-close {
+    width: 27px;
+    height: 27px;
+    min-width: 27px;
+    min-height: 27px;
+    padding: 7px;
+    background-origin: content-box;
+    box-sizing: content-box;
+  }
 }

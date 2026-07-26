@@ -102,9 +102,11 @@ BYM_ADMIN_USERS=YourName python dev_server.py
 
 > **Note on storage.** `STORAGE_DIR` defaults to the directory containing
 > `dev_server.py`, so a plain run creates `server_*/`, `imagecache/`,
-> `users/`, `admin/`, `alliances/` and `logs/` alongside the code. Those are
-> in `.gitignore`, but for anything beyond a quick test, point `STORAGE_DIR`
-> at a directory outside the repository.
+> `users/`, `admin/`, `alliances/`, `logs/` and `metrics/` alongside the code.
+> `start.bat` points it at `./storage` instead, which keeps the same trees one
+> level down. Both layouts are covered by `.gitignore`, but for anything
+> beyond a quick test point `STORAGE_DIR` at a directory outside the
+> repository — the zone cache and logs hold player data.
 
 ---
 
@@ -181,10 +183,10 @@ budget is contended.
 | `POST /api/{version}/player/getinfo` | 10 |
 | `POST /base/load` | 10 |
 | `POST /worldmapv2/getarea` — opening a base viewer | 10 |
-| `POST /worldmapv2/getarea` — zone of your main yard | 10 |
+| `POST /api/{version}/bm/getnewmap` | 10 |
 | `GET /api/{version}/worlds` | 9 |
 | `GET /api/{version}/leaderboards` | 9 |
-| `POST /api/{version}/bm/getnewmap` | 9 |
+| `POST /worldmapv2/getarea` — zone of your main yard | 9 |
 | `POST /worldmapv2/getarea` — zones of your outposts | 8 |
 | `POST /worldmapv2/getarea` — zones holding allied bases | 7 |
 | `POST /worldmapv2/getarea` — within 2 zones of your bases | 6 |
@@ -197,6 +199,36 @@ budget is contended.
 Priority travels in the `X-Fetch-Priority` header, is clamped to 1–10, and
 defaults to 1 when absent. Zone distances are counted in zones and are
 wrap-aware.
+
+Tier 10 is reserved for requests a person is actively waiting on, which is why
+a background refresh of your own main-yard zone sits at 9 — it must never land
+in front of a base you just clicked.
+
+**Priority bands.** Each user's per-minute allowance carries two further
+ceilings, so background panning cannot spend the whole thing: low covers
+priorities 1–5, medium covers 6–8, and 9–10 have no band ceiling of their own.
+A call must clear both the per-user total and its band. Keep low + medium below
+the per-user figure and the difference is budget nothing under priority 9 can
+reach.
+
+**Sign-in reserve.** Token verification is never queued — a saturated budget
+must not lock anyone out of signing in — so the queue runs on the global limit
+minus a small reserve rather than letting those calls overshoot it.
+
+**Anti-starvation.** A waiter's effective priority climbs one step every eighth
+of the maximum wait, capped below the interactive tiers. Background work
+overtakes other background work as it ages, but never a click.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
+## Usage history
+
+Outbound-call counters roll up hourly into `storage/metrics/usage-YYYY-MM-DD.json`,
+flushed every 15 seconds and on shutdown, and reloaded at startup so figures
+survive a restart. The admin console reports any UTC day range — totals, per
+day, per priority band, per category, busiest hours, and per caller — and
+exports the same data as CSV or JSON. Retention is `metricsRetentionDays`
+(default 30); older day files are deleted at startup. Roughly 20–40 KB per day.
 
 **Scheduling is strict priority.** Higher priorities always go first, and
 low-priority wilderness zones wait — and eventually give up — by design. A

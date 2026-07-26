@@ -344,6 +344,41 @@ export function normalizeBaseUrl(value) {
   return String(value || "").replace(/\/+$/, "");
 }
 
+/**
+ * localStorage that cannot take the app down with it.
+ *
+ * getItem/setItem throw - not return null - when storage is disabled, when the
+ * origin is opaque, or when the quota is exhausted. Three call sites were
+ * reading and writing the session token bare, and the first of them runs
+ * inside restoreSession() before anything is on screen, so a throw there took
+ * out sign-in entirely rather than degrading to "no remembered session".
+ */
+export function storageGet(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (error) {
+    return null;
+  }
+}
+
+export function storageSet(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    console.warn("[BYM-MR2] Could not write to localStorage.", error);
+    return false;
+  }
+}
+
+export function storageRemove(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch (error) {
+    /* nothing to clean up if storage is unavailable */
+  }
+}
+
 export function buildTokenStorageKey(config) {
   return `${TOKEN_STORAGE_KEY}:${normalizeBaseUrl(config?.bymBaseUrl || DEFAULT_VIEWER_CONFIG.bymBaseUrl)}`;
 }

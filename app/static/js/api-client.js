@@ -14,19 +14,48 @@ import {
  * 1 = lowest, 10 = highest; higher priorities are sent upstream first when
  * the budget is contended. Zone fetches carry a computed score instead (see
  * MapRenderer.zonePriorityFor).
+ *
+ * The tiers mean something specific, which is what keeps them useful:
+ *
+ *   10  someone is watching a spinner for THIS request. Reserved for
+ *       user-initiated work, and unreachable by the server's aging, so a
+ *       clicked base is never queued behind accumulated map traffic.
+ *    9  session bootstrap and opened panels - blocking, but not a click.
+ *    8  and below: map streaming, ordered by how much the player cares.
+ *
+ * Own-main-yard zones used to sit at 10 alongside /base/load, so a routine
+ * refresh of your own zone competed head-to-head with a base you had just
+ * opened and won on arrival order. They are 9 now.
  */
 export const FETCH_PRIORITY = {
   init: 10,          //  POST /init
   getinfo: 10,       //  POST /api/{v}/player/getinfo (login / session)
   baseLoad: 10,      //  POST /base/load
+  getNewMap: 10,     //  POST /api/{v}/bm/getnewmap (map bootstrap)
+  zoneReload: 10,    //  a zone the player explicitly asked to refresh
   worlds: 9,         //  GET  /api/{v}/worlds
   leaderboards: 9,   //  GET  /api/{v}/leaderboards
-  getNewMap: 9,      //  POST /api/{v}/bm/getnewmap
   lowest: 1,
 };
 
-// Zone fetches at or above this priority bypass the client-side pacer.
+// Zone fetches at or above this bypass the client-side pacer entirely. Now
+// that own-main-yard zones score 9, this threshold covers them and the
+// explicit reloads at 10 - previously nothing but 10 could reach it.
 export const ZONE_PACER_BYPASS_PRIORITY = 9;
+
+// Client-side anti-starvation, mirroring the server's. Without it a zone can
+// clear the server gate's aging only to sit behind newer, higher-tier zones
+// in the browser's own pacer. Same ceiling: aging never manufactures an
+// interactive-tier request.
+export const PACER_AGE_STEP_MS = 4000;
+export const PACER_AGE_CEILING = 8;
+
+export function agedPriority(base, waitingSinceMs, now = Date.now()) {
+  const tier = Number(base) || 1;
+  if (tier >= PACER_AGE_CEILING) return tier;
+  const steps = Math.floor(Math.max(0, now - waitingSinceMs) / PACER_AGE_STEP_MS);
+  return Math.min(PACER_AGE_CEILING, tier + steps);
+}
 
 export class ApiClient {
   constructor(config = getViewerConfig()) {
@@ -283,7 +312,12 @@ export class ApiClient {
    * and the highest priority one goes next; ties break by arrival order.
    */
   async waitForZoneRequestSlot(priority = 1) {
-    const waiter = { priority: Number(priority) || 1, seq: this.zoneWaiterSeq++, wake: null };
+    const waiter = {
+      priority: Number(priority) || 1,
+      since: Date.now(),
+      seq: this.zoneWaiterSeq++,
+      wake: null,
+    };
     waiter.ready = new Promise((resolve) => { waiter.wake = resolve; });
     this.zoneWaiters.add(waiter);
 
@@ -298,12 +332,16 @@ export class ApiClient {
           (startedAt) => startedAt > cutoff,
         );
 
-        // Our turn only when nobody waiting outranks us.
+        // Our turn only when nobody waiting outranks us, comparing AGED
+        // priorities so a long-parked low-tier zone eventually goes.
         let best = waiter;
+        let bestPriority = agedPriority(waiter.priority, waiter.since, now);
         for (const other of this.zoneWaiters) {
-          if (other.priority > best.priority
-            || (other.priority === best.priority && other.seq < best.seq)) {
+          const otherPriority = agedPriority(other.priority, other.since, now);
+          if (otherPriority > bestPriority
+            || (otherPriority === bestPriority && other.seq < best.seq)) {
             best = other;
+            bestPriority = otherPriority;
           }
         }
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gzip
-import heapq
 import itertools
 import json
 import os
@@ -250,31 +249,89 @@ HIDDEN_WATER_HEIGHT = 60  # water1 band, matching natural lakes
 # it at runtime from the /setup/ console; the env var only sets the default.
 DEFAULT_MAX_API_PER_MINUTE = max(1, int(os.environ.get("BYM_MAX_API_PER_MINUTE", "30") or 30))
 DEFAULT_MAX_API_PER_MINUTE_PER_USER = max(1, int(os.environ.get("BYM_MAX_API_PER_MINUTE_PER_USER", "10") or 10))
+# Band ceilings inside the per-user allowance. The defaults sum to 8 of 10, so
+# two slots a minute are unreachable by anything below priority 9.
+DEFAULT_MAX_LOW_PER_MINUTE_PER_USER = max(1, int(os.environ.get("BYM_MAX_LOW_PER_MINUTE_PER_USER", "5") or 5))
+DEFAULT_MAX_MEDIUM_PER_MINUTE_PER_USER = max(1, int(os.environ.get("BYM_MAX_MEDIUM_PER_MINUTE_PER_USER", "3") or 3))
 BYM_CALL_TIMES: list = []
 BYM_CALL_LOCK = threading.Condition()
 BYM_WINDOW_SECONDS = 60.0
 # Max time a request may wait for budget is admin-tunable ("bymMaxWaitSeconds",
 # default 600); see SETTINGS_FIELD_RULES.
-# Pending waiters as a heap of (-priority, sequence): when a slot frees, the
-# highest-priority waiter across ALL connected users takes it. Ties go to
-# whoever asked first.
+# Pending waiters as a flat list of (-priority, sequence, user_key, started).
+# When a slot frees, the waiter with the highest EFFECTIVE priority across all
+# connected users takes it; ties go to whoever asked first. A plain list, not
+# a heap: effective priority changes with waiting time (see
+# _effective_priority), so no static ordering survives long enough to be worth
+# maintaining - and the eligibility scan already had to be linear because a
+# waiter whose per-user window is exhausted has to be skipped.
 BYM_WAITERS: list = []
 BYM_WAITER_SEQ = itertools.count()
-# Per-user sliding windows: key -> list of monotonic call times. Keys are
-# "user:<name>" for recognized sessions, "tok:<prefix>" for unrecognized
+# Per-user sliding windows: key -> list of (monotonic call time, band). Keys
+# are "user:<name>" for recognized sessions, "tok:<prefix>" for unrecognized
 # tokens, "ip:<addr>" for anonymous calls. Mutated under BYM_CALL_LOCK.
+#
+# The band rides along so one user's background panning cannot spend their
+# whole per-minute allowance and leave nothing for the things they are
+# actually waiting on. A call has to clear BOTH the per-user total and its own
+# band cap.
 BYM_USER_CALLS: dict = {}
 
+# Priority bands. High is deliberately uncapped beyond the per-user total:
+# every tier in it is a request someone is watching a spinner for.
+BYM_BAND_LOW = "low"          # priorities 1-5: distant rings, everything else
+BYM_BAND_MEDIUM = "medium"    # priorities 6-8: own outposts, allies, near rings
+BYM_BAND_HIGH = "high"        # priorities 9-10: clicks, panels, bootstrap
 
-def user_window_free(user_key: str, per_user_limit: int, now: float) -> bool:
+
+def priority_band(priority: int) -> str:
+    value = int(priority)
+    if value >= 9:
+        return BYM_BAND_HIGH
+    if value >= 6:
+        return BYM_BAND_MEDIUM
+    return BYM_BAND_LOW
+
+
+def band_limit(band: str) -> int:
+    """Per-minute ceiling for a band, or 0 for "no band ceiling"."""
+    if band == BYM_BAND_LOW:
+        return int(get_setting("maxLowPriorityPerMinutePerUser"))
+    if band == BYM_BAND_MEDIUM:
+        return int(get_setting("maxMediumPriorityPerMinutePerUser"))
+    return 0
+# Keys are only dropped when their window is next inspected, and the key is not
+# always a username: rate_limit_key() falls back to tok:{prefix} when a token
+# is not cached, and BYMR mints a fresh token on every verification. Those keys
+# are used once and abandoned, so the dict needs the same idle sweep
+# RATE_BUCKETS already has.
+BYM_USER_CALLS_SWEEP_AT = 2000
+
+
+def user_window_free(user_key: str, per_user_limit: int, now: float,
+                     priority: int = 10) -> bool:
+    """True when this user may spend a slot on a call of this priority.
+
+    Two ceilings, both per user per minute: the overall allowance, and the
+    band's own. A tier-1 zone that has used up the low-priority allowance is
+    held even though the user has total budget left - which is the point: the
+    remainder stays available for the tiers they are waiting on.
+    """
     times = BYM_USER_CALLS.get(user_key)
     if times is not None:
-        while times and times[0] <= now - BYM_WINDOW_SECONDS:
+        cutoff = now - BYM_WINDOW_SECONDS
+        while times and times[0][0] <= cutoff:
             times.pop(0)
         if not times:
             BYM_USER_CALLS.pop(user_key, None)
             times = None
-    return len(times or ()) < per_user_limit
+    if len(times or ()) >= per_user_limit:
+        return False
+    band = priority_band(priority)
+    ceiling = band_limit(band)
+    if ceiling <= 0:
+        return True
+    return sum(1 for _t, b in (times or ()) if b == band) < ceiling
 SERVER_STARTED_AT = time.time()
 # Minute-bucket history of outbound calls (last ~2h) for the admin console's
 # usage statistics. Mutated only while holding BYM_CALL_LOCK.
@@ -324,16 +381,23 @@ def _prune_minutes(buckets: dict, minute: int) -> None:
 
 
 def metric_inc(name: str, amount: int = 1) -> None:
-    minute = int(time.time() // 60)
+    now = time.time()
+    minute = int(now // 60)
     with METRICS_LOCK:
         bucket = METRICS_MINUTES.setdefault(minute, {})
         bucket[name] = bucket.get(name, 0) + amount
         _prune_minutes(METRICS_MINUTES, minute)
+        _record_hourly(name, amount, now=now)
 
 
 def metric_user_call(user_key: str) -> None:
-    minute = int(time.time() // 60)
+    now = time.time()
+    minute = int(now // 60)
     with METRICS_LOCK:
+        # "total" is the one counter that is both a global figure and a
+        # per-user one, so the rollup can answer "who used the budget" without
+        # a second pass.
+        _record_hourly("total", 1, user_key=user_key, now=now)
         buckets = METRICS_USER_MINUTES.setdefault(user_key, {})
         buckets[minute] = buckets.get(minute, 0) + 1
         _prune_minutes(buckets, minute)
@@ -346,13 +410,267 @@ def metric_user_call(user_key: str) -> None:
 
 
 def metric_wait(waited_ms: float, priority: int) -> None:
+    now = time.time()
     with METRICS_LOCK:
-        METRICS_WAITS.append((time.time(), float(waited_ms), int(priority)))
+        METRICS_WAITS.append((now, float(waited_ms), int(priority)))
+        _record_hourly("waitCount", 1, now=now)
+        _record_hourly("waitSumMs", int(waited_ms), now=now)
+        bucket = _today_bucket(now)["hours"].setdefault(_utc_hour(now), {})
+        bucket["waitMaxMs"] = max(int(bucket.get("waitMaxMs", 0)), int(waited_ms))
 
 
 def metric_upstream(elapsed_ms: float, ok: bool) -> None:
+    now = time.time()
     with METRICS_LOCK:
-        METRICS_UPSTREAM.append((time.time(), float(elapsed_ms), bool(ok)))
+        METRICS_UPSTREAM.append((now, float(elapsed_ms), bool(ok)))
+        _record_hourly("upstream:ok" if ok else "upstream:fail", 1, now=now)
+        if ok:
+            _record_hourly("upstreamSumMs", int(elapsed_ms), now=now)
+
+
+# ---------------------------------------------------------------------------
+# Persistent usage history.
+#
+# The minute buckets above are the live view and stay in memory. Everything
+# also rolls up into an hourly per-day file under storage/metrics, which is
+# what survives a restart and what the console reports over long periods.
+# Hourly rather than per-minute on purpose: a day of minute-resolution
+# per-user data is hundreds of thousands of entries, an hourly one is a few
+# thousand, and no question the console asks needs finer than an hour once you
+# are past the last 60 minutes.
+# ---------------------------------------------------------------------------
+METRICS_TODAY: dict = {"day": "", "hours": {}, "users": {}}
+METRICS_TODAY_DIRTY = False
+METRICS_FLUSH_SECONDS = 15.0
+
+
+def metrics_dir() -> "Path":
+    path = STORAGE_ROOT / "metrics"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _utc_day(ts: float = None) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts if ts is not None else time.time()))
+
+
+def _utc_hour(ts: float = None) -> str:
+    return time.strftime("%H", time.gmtime(ts if ts is not None else time.time()))
+
+
+def _today_bucket(now: float = None) -> dict:
+    """Current day's rollup, rotating (and flushing) at UTC midnight.
+
+    Caller must hold METRICS_LOCK.
+    """
+    global METRICS_TODAY, METRICS_TODAY_DIRTY
+    day = _utc_day(now)
+    if METRICS_TODAY.get("day") != day:
+        if METRICS_TODAY.get("day"):
+            _write_day(METRICS_TODAY)
+        loaded = _read_day(day)
+        METRICS_TODAY = loaded or {"day": day, "hours": {}, "users": {}}
+        METRICS_TODAY_DIRTY = False
+    return METRICS_TODAY
+
+
+def _day_path(day: str) -> "Path":
+    return metrics_dir() / f"usage-{day}.json"
+
+
+def _read_day(day: str) -> dict:
+    try:
+        raw = _day_path(day).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("day") != day:
+        return {}
+    data.setdefault("hours", {})
+    data.setdefault("users", {})
+    return data
+
+
+def _write_day(bucket: dict) -> None:
+    day = bucket.get("day")
+    if not day:
+        return
+    path = _day_path(day)
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(bucket, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as error:
+        print(f"[metrics] could not write {path.name}: {error}")
+
+
+def metrics_flush(force: bool = False) -> None:
+    """Writes the current day's rollup if anything changed."""
+    global METRICS_TODAY_DIRTY
+    with METRICS_LOCK:
+        if not METRICS_TODAY_DIRTY and not force:
+            return
+        bucket = json.loads(json.dumps(METRICS_TODAY))
+        METRICS_TODAY_DIRTY = False
+    _write_day(bucket)
+
+
+def metrics_prune_files() -> int:
+    """Drops day files past the retention window. Returns how many were removed."""
+    try:
+        keep_days = int(get_setting("metricsRetentionDays"))
+    except Exception:
+        keep_days = 30
+    cutoff = _utc_day(time.time() - keep_days * 86400)
+    removed = 0
+    try:
+        for path in metrics_dir().glob("usage-*.json"):
+            day = path.stem.replace("usage-", "")
+            if len(day) == 10 and day < cutoff:
+                path.unlink(missing_ok=True)
+                removed += 1
+    except OSError:
+        pass
+    return removed
+
+
+def _metrics_writer_loop() -> None:
+    while True:
+        time.sleep(METRICS_FLUSH_SECONDS)
+        try:
+            metrics_flush()
+        except Exception as error:            # never take the server down
+            print(f"[metrics] flush failed: {error}")
+
+
+def start_metrics_writer() -> None:
+    with METRICS_LOCK:
+        _today_bucket()
+    metrics_prune_files()
+    thread = threading.Thread(target=_metrics_writer_loop, daemon=True,
+                              name="metrics-writer")
+    thread.start()
+
+
+def _record_hourly(counter: str, amount: int = 1, user_key: str = "",
+                   now: float = None) -> None:
+    """Adds to the on-disk rollup. Caller must hold METRICS_LOCK."""
+    global METRICS_TODAY_DIRTY
+    bucket = _today_bucket(now)
+    hour = _utc_hour(now)
+    hours = bucket["hours"].setdefault(hour, {})
+    hours[counter] = hours.get(counter, 0) + amount
+    if user_key:
+        user = bucket["users"].setdefault(user_key, {})
+        user[hour] = user.get(hour, 0) + amount
+    METRICS_TODAY_DIRTY = True
+
+
+def usage_report(day_from: str, day_to: str) -> dict:
+    """Aggregates the stored rollups across an inclusive UTC day range."""
+    metrics_flush()
+    days = []
+    try:
+        for path in sorted(metrics_dir().glob("usage-*.json")):
+            day = path.stem.replace("usage-", "")
+            if day_from <= day <= day_to:
+                data = _read_day(day)
+                if data:
+                    days.append(data)
+    except OSError:
+        pass
+
+    totals: dict = {}
+    per_day: list = []
+    per_user: dict = {}
+    per_hour_of_day = {f"{h:02d}": 0 for h in range(24)}
+    for data in days:
+        day_total = 0
+        day_counters: dict = {}
+        for hour, counters in sorted(data.get("hours", {}).items()):
+            for name, count in counters.items():
+                totals[name] = totals.get(name, 0) + count
+                day_counters[name] = day_counters.get(name, 0) + count
+                if name == "total":
+                    day_total += count
+                    per_hour_of_day[hour] = per_hour_of_day.get(hour, 0) + count
+        for key, hours in data.get("users", {}).items():
+            entry = per_user.setdefault(key, {"calls": 0, "days": 0})
+            calls = sum(int(v) for v in hours.values())
+            entry["calls"] += calls
+            entry["days"] += 1 if calls else 0
+        per_day.append({"day": data.get("day"), "total": day_total,
+                        "counters": day_counters})
+
+    wait_count = totals.get("waitCount", 0)
+    return {
+        "from": day_from,
+        "to": day_to,
+        "days": per_day,
+        "dayCount": len(per_day),
+        "total": totals.get("total", 0),
+        "counters": totals,
+        "byPriority": {str(p): totals.get(f"prio:{p}", 0) for p in range(1, 11)},
+        "byBand": {
+            "low": sum(totals.get(f"prio:{p}", 0) for p in range(1, 6)),
+            "medium": sum(totals.get(f"prio:{p}", 0) for p in range(6, 9)),
+            "high": sum(totals.get(f"prio:{p}", 0) for p in range(9, 11)),
+        },
+        "byCategory": {k[4:]: v for k, v in totals.items() if k.startswith("cat:")},
+        "rejects": {
+            "queueFull": totals.get("reject:queue", 0),
+            "timeout": totals.get("reject:timeout", 0),
+        },
+        "wait": {
+            "count": wait_count,
+            "avgMs": round(totals.get("waitSumMs", 0) / wait_count, 1) if wait_count else 0,
+            "maxMs": totals.get("waitMaxMs", 0),
+        },
+        "upstream": {
+            "ok": totals.get("upstream:ok", 0),
+            "fail": totals.get("upstream:fail", 0),
+            "avgMs": (round(totals.get("upstreamSumMs", 0) / totals.get("upstream:ok", 1), 1)
+                      if totals.get("upstream:ok") else 0),
+        },
+        "hourOfDay": per_hour_of_day,
+        "users": sorted(
+            ({"key": k, **v} for k, v in per_user.items()),
+            key=lambda row: -row["calls"],
+        ),
+    }
+
+
+def usage_report_csv(report: dict) -> str:
+    """Flat CSV: one section per block, so a spreadsheet can pivot it."""
+    lines = ["section,key,value"]
+
+    def add(section: str, key: str, value) -> None:
+        safe = str(key).replace('"', "'")
+        lines.append(f'{section},"{safe}",{value}')
+
+    add("range", "from", report["from"])
+    add("range", "to", report["to"])
+    add("range", "days", report["dayCount"])
+    add("total", "calls", report["total"])
+    for day in report["days"]:
+        add("perDay", day["day"], day["total"])
+    for key, value in sorted(report["byPriority"].items(), key=lambda kv: int(kv[0])):
+        add("priority", key, value)
+    for key, value in report["byBand"].items():
+        add("band", key, value)
+    for key, value in sorted(report["byCategory"].items()):
+        add("category", key, value)
+    for key, value in report["rejects"].items():
+        add("rejected", key, value)
+    for key, value in report["wait"].items():
+        add("queueWait", key, value)
+    for key, value in report["upstream"].items():
+        add("upstream", key, value)
+    for hour, value in sorted(report["hourOfDay"].items()):
+        add("hourOfDay", hour, value)
+    for row in report["users"]:
+        add("user", row["key"], row["calls"])
+    return "\n".join(lines) + "\n"
 
 
 def _percentile(sorted_values: list, fraction: float) -> float:
@@ -464,6 +782,10 @@ SETTINGS_FIELD_RULES = {
     # Game-API budget
     "maxApiPerMinute": (DEFAULT_MAX_API_PER_MINUTE, 1, 600),
     "maxApiPerMinutePerUser": (DEFAULT_MAX_API_PER_MINUTE_PER_USER, 1, 600),
+    # Ceilings for priorities 1-5 and 6-8 inside that allowance. Priorities
+    # 9-10 have no band ceiling of their own.
+    "maxLowPriorityPerMinutePerUser": (DEFAULT_MAX_LOW_PER_MINUTE_PER_USER, 1, 600),
+    "maxMediumPriorityPerMinutePerUser": (DEFAULT_MAX_MEDIUM_PER_MINUTE_PER_USER, 1, 600),
     "bymMaxQueueDepth": (DEFAULT_BYM_MAX_QUEUE_DEPTH, 1, 2000),
     "bymMaxQueueDepthPerUser": (DEFAULT_BYM_MAX_QUEUE_DEPTH_PER_USER, 1, 500),
     "bymMaxWaitSeconds": (DEFAULT_BYM_MAX_WAIT_SECONDS, 5, 600),
@@ -478,6 +800,12 @@ SETTINGS_FIELD_RULES = {
     # Pushed to browsers at sign-in (0 = automatic)
     "clientZonePace": (0, 0, 600),         # 0: follow the per-user API limit
     "clientZoneConcurrency": (0, 0, 12),   # 0: client default (4)
+    # 1: names in admin/admins.json skip every limit above (see
+    # requester_bypasses_limits). 0: admins queue like everyone else.
+    "adminBypassLimits": (1, 0, 1),
+    # How many days of hourly usage history to keep on disk. Files past this
+    # are deleted on startup; roughly 20-40 KB per day.
+    "metricsRetentionDays": (30, 1, 400),
 }
 
 
@@ -518,13 +846,30 @@ def get_max_api_per_minute_per_user() -> int:
     return get_setting("maxApiPerMinutePerUser")
 
 
+def auth_reserve(limit: int) -> int:
+    """Slots held back from the queue so ungated calls fit inside the budget.
+
+    record_bym_call() never blocks, so before this existed a burst of token
+    verifications could push the window past maxApiPerMinute and stall every
+    queued map fetch until entries expired - the one place the cap was not
+    actually a cap. Reserving a slice for it instead means the total stays
+    within the configured limit; map traffic simply gets the remainder.
+    """
+    return min(5, max(1, limit // 10))
+
+
 def record_bym_call() -> None:
-    # Counts a call against the sliding window WITHOUT gating. Used by token
-    # verification: if it queued like map traffic, a saturated budget would
-    # lock everyone out of signing in - including the admin trying to reach
-    # the console to raise the limit. The call is still recorded, so the
+    # Counts a call against the GLOBAL sliding window WITHOUT gating. Used by
+    # token verification: if it queued like map traffic, a saturated budget
+    # would lock everyone out of signing in - including the admin trying to
+    # reach the console to raise the limit. The call is still recorded, so the
     # following map fetches absorb the cost and the per-minute average never
     # exceeds the configured cap.
+    #
+    # Per-user attribution is deliberately separate: at the moment a token is
+    # verified we do not yet know whose token it is. Callers that learn the
+    # owner attribute the call afterwards via attribute_bym_call(); calls with
+    # no owner at all (the shared /worlds cache refresh) stay global-only.
     with BYM_CALL_LOCK:
         now = time.monotonic()
         while BYM_CALL_TIMES and BYM_CALL_TIMES[0] <= now - BYM_WINDOW_SECONDS:
@@ -533,10 +878,60 @@ def record_bym_call() -> None:
         note_bym_history()
 
 
+def attribute_bym_call(user_key: str, priority: int = 10) -> None:
+    """Charges an already-recorded global call to a user's per-minute window.
+
+    Without this, an ungated call (token verification) spends shared budget
+    that never appears in the caller's own window, so per-user fairness
+    under-counts exactly the traffic a client can generate most cheaply by
+    reconnecting. Pairs with record_bym_call(), which does the global half.
+    """
+    if not user_key:
+        return
+    with BYM_CALL_LOCK:
+        now = time.monotonic()
+        calls = BYM_USER_CALLS.setdefault(user_key, [])
+        cutoff = now - BYM_WINDOW_SECONDS
+        while calls and calls[0][0] <= cutoff:
+            calls.pop(0)
+        calls.append((now, priority_band(priority)))
+
+
 # Outbound call priority: 1 = lowest, 10 = highest. Higher priorities are
 # dequeued first when the per-minute budget is contended.
 BYM_PRIORITY_MIN = 1
 BYM_PRIORITY_MAX = 10
+
+# Anti-starvation aging. Strict priority alone means a priority-1 zone on a
+# busy server can lose every contest until its deadline and 429 forever, so a
+# waiter's EFFECTIVE priority climbs one step for each
+# (bymMaxWaitSeconds / BYM_AGE_STEPS) seconds it has been parked. Sizing it
+# off the deadline rather than a fixed interval means the promotion always
+# spans the wait, whatever the deadline is set to, and adds no new knob.
+#
+# The ceiling is the point: aging lets background work overtake OTHER
+# background work, never a base the player just clicked. Tiers 9 and 10 are
+# reserved for calls someone is actively waiting on and are never reachable
+# by waiting.
+BYM_AGE_STEPS = 8
+BYM_AGE_CEILING = 8
+
+
+def _effective_priority(base: int, started: float, now: float, max_wait: float) -> int:
+    """Priority as scheduled right now: assigned tier plus accrued age."""
+    if base >= BYM_AGE_CEILING:
+        return base
+    step = max(1.0, float(max_wait) / BYM_AGE_STEPS)
+    return min(BYM_AGE_CEILING, base + int(max(0.0, now - started) / step))
+
+
+def _outranks(left: tuple, right: tuple, now: float, max_wait: float) -> bool:
+    """True when waiter `left` should be served before waiter `right`."""
+    left_priority = _effective_priority(-left[0], left[3], now, max_wait)
+    right_priority = _effective_priority(-right[0], right[3], now, max_wait)
+    if left_priority != right_priority:
+        return left_priority > right_priority
+    return left[1] < right[1]  # same effective tier: whoever asked first
 
 
 def _retry_after_estimate(position: int) -> int:
@@ -572,7 +967,8 @@ def acquire_bym_slot(priority: int = BYM_PRIORITY_MIN, user_key: str = "anon") -
     immediately.
     """
     started = time.monotonic()
-    deadline = started + get_setting("bymMaxWaitSeconds")
+    max_wait = get_setting("bymMaxWaitSeconds")
+    deadline = started + max_wait
     entry = (-int(priority), next(BYM_WAITER_SEQ), user_key, started)
     with BYM_CALL_LOCK:
         depth = len(BYM_WAITERS)
@@ -582,31 +978,43 @@ def acquire_bym_slot(priority: int = BYM_PRIORITY_MIN, user_key: str = "anon") -
         if user_depth >= get_setting("bymMaxQueueDepthPerUser"):
             return (False, "user-queue-full", 0.0, _retry_after_estimate(user_depth))
 
-        heapq.heappush(BYM_WAITERS, entry)
+        if len(BYM_USER_CALLS) > BYM_USER_CALLS_SWEEP_AT:
+            cutoff = time.monotonic() - BYM_WINDOW_SECONDS
+            for stale in [k for k, v in BYM_USER_CALLS.items()
+                          if not v or v[-1][0] <= cutoff]:
+                BYM_USER_CALLS.pop(stale, None)
+        BYM_WAITERS.append(entry)
         try:
             while True:
+                # Leave headroom for the ungated sign-in path so a burst of
+                # token verifications cannot push the window past the cap.
                 limit = get_max_api_per_minute()
+                limit = max(1, limit - auth_reserve(limit))
                 per_user = get_max_api_per_minute_per_user()
                 now = time.monotonic()
                 while BYM_CALL_TIMES and BYM_CALL_TIMES[0] <= now - BYM_WINDOW_SECONDS:
                     BYM_CALL_TIMES.pop(0)
-                if len(BYM_CALL_TIMES) < limit and user_window_free(user_key, per_user, now):
+                if (len(BYM_CALL_TIMES) < limit
+                        and user_window_free(user_key, per_user, now, priority)):
                     # Our turn only if nobody strictly ahead of us (higher
                     # priority, or same priority but earlier) is eligible too.
                     ahead_eligible = any(
-                        waiting < entry and user_window_free(waiting[2], per_user, now)
+                        _outranks(waiting, entry, now, max_wait)
+                        and user_window_free(waiting[2], per_user, now, -waiting[0])
                         for waiting in BYM_WAITERS
                     )
                     if not ahead_eligible:
                         BYM_CALL_TIMES.append(now)
-                        BYM_USER_CALLS.setdefault(user_key, []).append(now)
+                        BYM_USER_CALLS.setdefault(user_key, []).append(
+                            (now, priority_band(priority)))
                         note_bym_history()
                         # Wake the outranked so they recompute their wait
                         # against the now-smaller window headroom.
                         BYM_CALL_LOCK.notify_all()
                         return (True, "ok", now - started, 0)
                 if now >= deadline:
-                    ahead = sum(1 for waiting in BYM_WAITERS if waiting < entry)
+                    ahead = sum(1 for waiting in BYM_WAITERS
+                                if _outranks(waiting, entry, now, max_wait))
                     return (False, "timeout", now - started, _retry_after_estimate(ahead))
                 # Sleep until the next instant capacity can appear on its own.
                 # Notifications cover every other state change; the 5s cap is
@@ -616,11 +1024,27 @@ def acquire_bym_slot(priority: int = BYM_PRIORITY_MIN, user_key: str = "anon") -
                     wakeups.append(BYM_CALL_TIMES[0] + BYM_WINDOW_SECONDS)
                 own_calls = BYM_USER_CALLS.get(user_key)
                 if own_calls:
-                    wakeups.append(own_calls[0] + BYM_WINDOW_SECONDS)
+                    # Wake when our oldest call expires; if the band is what is
+                    # holding us, wake when the oldest call in OUR band expires
+                    # instead, which is later.
+                    wakeups.append(own_calls[0][0] + BYM_WINDOW_SECONDS)
+                    own_band = priority_band(priority)
+                    band_times = [t for t, b in own_calls if b == own_band]
+                    if band_times and band_limit(own_band) > 0:
+                        wakeups.append(band_times[0] + BYM_WINDOW_SECONDS)
+                # Aging can promote us with nothing else changing, so wake at
+                # our own next age step too.
+                if -entry[0] < BYM_AGE_CEILING:
+                    step = max(1.0, float(max_wait) / BYM_AGE_STEPS)
+                    wakeups.append(now + step - ((now - started) % step))
                 BYM_CALL_LOCK.wait(timeout=max(0.05, min(min(wakeups) - now, 5.0)))
         finally:
-            BYM_WAITERS.remove(entry)
-            heapq.heapify(BYM_WAITERS)
+            # Defensive: this runs on every exit path, and a raise here would
+            # both leak a queue slot and kill the serving thread.
+            try:
+                BYM_WAITERS.remove(entry)
+            except ValueError:
+                pass
             BYM_CALL_LOCK.notify_all()
 BYM_API_VERSION = os.environ.get("BYM_API_VERSION", "v1.6.8-beta").strip("/")
 # The game server is behind Cloudflare, which rejects the default
@@ -696,6 +1120,9 @@ def verify_bym_token(token: str):
         minted = str(payload.get("token", "")).strip()
         if candidate and not payload.get("error"):
             username = candidate
+            # Now that the owner is known, charge the getinfo call we already
+            # counted globally to their per-minute window too.
+            attribute_bym_call(f"user:{username.lower()}")
             if minted:
                 current_token = minted
         else:
@@ -730,7 +1157,7 @@ def verify_bym_token(token: str):
 
 # Bumped whenever server-side routes change, so clients can detect that a
 # stale dev_server.py process is still running after an update.
-SERVER_VERSION = "2026-07-23-streaming-map-reads"
+SERVER_VERSION = "2026-07-26-priority-bands-usage-history"
 
 AUDIT_LIMIT = 500
 
@@ -941,6 +1368,8 @@ def known_world_ids():
 
     ids: set = set()
     ok = False
+    # Server-wide cache refresh on a TTL, not attributable to any one player:
+    # global window only, by design.
     record_bym_call()
     worlds_url = f"{BYM_BASE_URL}/api/{BYM_API_VERSION}/worlds"
     try:
@@ -1514,8 +1943,14 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         if parts is None:
             self.send_json(400, {"error": "Invalid asset path"})
             return
-        local = imagecache_dir().joinpath(*parts).resolve()
-        if not str(local).startswith(str(imagecache_dir().resolve())):
+        root = imagecache_dir().resolve()
+        local = root.joinpath(*parts).resolve()
+        # is_relative_to rather than a string prefix: startswith() would also
+        # accept a sibling directory whose name merely begins with the cache
+        # root ("imagecacheEVIL"). Unreachable today because
+        # sanitize_asset_path already rejects "..", but the weaker check should
+        # not be the thing standing between us and a traversal.
+        if not local.is_relative_to(root):
             self.send_json(400, {"error": "Invalid asset path"})
             return
 
@@ -1612,6 +2047,42 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 return forwarded[:64]
         return peer
 
+    def cached_session_name(self) -> str:
+        """Signed-in username from the token cache ONLY - never a network call.
+
+        requester_is_admin() resolves identity through verify_bym_token(),
+        which on a cache miss calls the game server AND rotates the token.
+        That is fine on admin endpoints; it must never happen on the
+        rate-limit hot path, which runs on every request. An admin whose
+        token is not currently cached simply gets limited like anyone else
+        until their next verified call warms it.
+        """
+        token = str(self.headers.get("X-Viewer-Token", "")).strip()
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        if not token:
+            return ""
+        with TOKEN_CACHE_LOCK:
+            cached = TOKEN_CACHE.get(token)
+        if (isinstance(cached, tuple) and len(cached) >= 3
+                and cached[0] and cached[2] > time.time()):
+            return str(cached[0])
+        return ""
+
+    def requester_bypasses_limits(self) -> bool:
+        """True when this caller is an admin and the bypass toggle is on.
+
+        Covers the viewer's own token buckets and the outbound BYM budget
+        queue. It does NOT cover fullMapConcurrency: that semaphore bounds how
+        much of a world is held in memory at once, so bypassing it would risk
+        the process rather than merely spending budget faster.
+        """
+        if not get_setting("adminBypassLimits"):
+            return False
+        name = self.cached_session_name()
+        return bool(name) and name.lower() in admin_name_set_lower()
+
     def rate_limit_key(self):
         """(key, per_minute, burst) for this request - the signed-in user's
         bucket when the presented token is currently cache-verified, else the
@@ -1634,6 +2105,8 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
 
     def enforce_rate_limit(self, path: str) -> bool:
         """Returns True if the request may proceed; sends the 429 otherwise."""
+        if self.requester_bypasses_limits():
+            return True
         if path == "/log":
             key = f"log:{self.client_ip()}"
             per_minute = float(get_setting("viewerLogPerMin"))
@@ -1976,20 +2449,34 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         compressor = zlib.compressobj(6, zlib.DEFLATED, 31) if accepts_gzip else None
         written = 0
 
+        # Frame the body with HTTP/1.1 chunked encoding rather than by closing
+        # the connection. A bodyless-length response forces intermediaries
+        # (Cloudflare Tunnel, nginx, any buffering proxy) to read the WHOLE
+        # thing before they can forward it, which for a full world means tens
+        # of megabytes buffered and a client that sits there with nothing.
+        # Chunked lets every zone reach the browser as it is produced.
+        self.protocol_version = "HTTP/1.1"
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         if compressor is not None:
             self.send_header("Content-Encoding", "gzip")
+        self.send_header("Transfer-Encoding", "chunked")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
+
+        def write_chunk(data: bytes) -> None:
+            if not data:
+                return
+            self.wfile.write(b"%X\r\n" % len(data))
+            self.wfile.write(data)
+            self.wfile.write(b"\r\n")
 
         def emit(text: str) -> None:
             data = text.encode("utf-8")
             if compressor is not None:
                 data = compressor.compress(data)
-            if data:
-                self.wfile.write(data)
+            write_chunk(data)
 
         try:
             emit('{"server": ' + json.dumps(server_name) + ', "zones": [')
@@ -2022,7 +2509,8 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
             if compressor is not None:
                 tail = compressor.flush()
                 if tail:
-                    self.wfile.write(tail)
+                    write_chunk(tail)
+            self.wfile.write(b"0\r\n\r\n")  # end of chunked body
         except (ConnectionError, BrokenPipeError):
             # Browser navigated away mid-download. Expected for big worlds;
             # one line instead of a traceback per abandoned request.
@@ -2149,7 +2637,16 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 cached_name = str(cached[0])
             user_key = f"user:{cached_name.lower()}" if cached_name else f"tok:{bearer[:16]}"
 
-        ok, reason, waited_seconds, retry_after = acquire_bym_slot(request_priority, user_key)
+        if self.requester_bypasses_limits():
+            # Ungated, but NOT unrecorded: the call still lands in the global
+            # and per-user windows so the console's usage figures stay honest
+            # and everyone else's scheduling accounts for the traffic. Same
+            # treatment token verification already gets.
+            record_bym_call()
+            attribute_bym_call(user_key, request_priority)
+            ok, reason, waited_seconds, retry_after = (True, "admin-bypass", 0.0, 0)
+        else:
+            ok, reason, waited_seconds, retry_after = acquire_bym_slot(request_priority, user_key)
         if not ok:
             metric_inc("reject:queue" if reason.endswith("queue-full") else "reject:timeout")
             self.send_json(
@@ -3064,6 +3561,11 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 "values": {field: get_setting(field) for field in SETTINGS_FIELD_RULES},
                 "rules": {field: {"default": rule[0], "min": rule[1], "max": rule[2]}
                           for field, rule in SETTINGS_FIELD_RULES.items()},
+                # Whether the admin bypass is on, and whether it is actually
+                # applying to this caller right now - identity comes from the
+                # token cache only, so those can disagree.
+                "bypassEnabled": bool(get_setting("adminBypassLimits")),
+                "bypassActive": self.requester_bypasses_limits(),
                 # Back-compat for anything still reading the old shape.
                 "maxApiPerMinute": get_max_api_per_minute(),
                 "maxApiPerMinutePerUser": get_max_api_per_minute_per_user(),
@@ -3071,9 +3573,48 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
             })
             return
 
+        if method == "GET" and endpoint == "usage":
+            # Aggregated history over a UTC day range. Defaults to the last 7
+            # days including today, which is what the console opens on.
+            query = urllib.parse.parse_qs(
+                self.path.split("?", 1)[1] if "?" in self.path else "")
+            today = _utc_day()
+            default_from = _utc_day(time.time() - 6 * 86400)
+            day_from = str(query.get("from", [default_from])[0])[:10] or default_from
+            day_to = str(query.get("to", [today])[0])[:10] or today
+            if day_from > day_to:
+                day_from, day_to = day_to, day_from
+            report = usage_report(day_from, day_to)
+            if str(query.get("format", [""])[0]).lower() == "csv":
+                body = usage_report_csv(report).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="bym-usage-{day_from}_to_{day_to}.csv"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_json(200, {"report": report})
+            return
+
         if method == "GET" and endpoint == "api-stats":
             # Lightweight poll target for the console's live stats panel.
-            self.send_json(200, {"stats": metrics_summary()})
+            # bypassActive is deliberately the *live* answer rather than just
+            # the setting: identity is resolved from the token cache only, so
+            # an admin whose token has aged out is limited normally until
+            # their next verified call warms it. Reporting the setting alone
+            # would tell them "on" while they were being queued.
+            self.send_json(200, {
+                "stats": metrics_summary(),
+                "bypassEnabled": bool(get_setting("adminBypassLimits")),
+                "bypassActive": self.requester_bypasses_limits(),
+                # The queue runs on limit minus the sign-in reserve, so the
+                # number the admin typed is not the number map traffic gets.
+                "queueLimit": max(1, get_max_api_per_minute()
+                                  - auth_reserve(get_max_api_per_minute())),
+                "authReserve": auth_reserve(get_max_api_per_minute()),
+            })
             return
 
         if method == "POST" and endpoint == "settings":
@@ -3629,6 +4170,10 @@ def main() -> None:
     if not STATIC_DIR.exists():
         raise SystemExit(f"Static directory does not exist: {STATIC_DIR}")
 
+    # Loads today's rollup back into memory and starts the background writer,
+    # so counters continue across a restart instead of resetting to zero.
+    start_metrics_writer()
+
     handler = partial(StaticViewerHandler, directory=str(STATIC_DIR))
     server = ThreadingHTTPServer((HOST, PORT), handler)
     print(f"Serving BYM MR2 Viewer at http://{HOST}:{PORT} (dev_server {SERVER_VERSION})")
@@ -3642,6 +4187,8 @@ def main() -> None:
     print(f"Static root: {STATIC_DIR}")
     print(f"Storage root: {STORAGE_ROOT} (server_{{name}}\\zones, users\\{{username}})")
     print(f"Serving .js as: {MIME_TYPES['.js']}")
+    print(f"Usage history: {metrics_dir()} "
+          f"(hourly, {get_setting('metricsRetentionDays')} day retention)")
     if not API_LOG_ENABLED_CATEGORIES:
         print("API-call log: OFF (BYM_API_LOG)")
     else:
@@ -3651,7 +4198,11 @@ def main() -> None:
         cap = f"{API_LOG_MAX_BODY} chars/body" if API_LOG_MAX_BODY > 0 else "uncapped bodies"
         print(f"API-call log: {STORAGE_ROOT / 'logs'}/api-calls-<date>.log ({scope}{suffix}, {cap}; "
               f"configure via BYM_API_LOG / BYM_API_LOG_MAX_BODY)")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        # Ctrl+C should not cost the last flush interval of history.
+        metrics_flush(force=True)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ import {
   zoneKey,
   zoneOriginForCell,
 } from "./shared.js";
+import { FETCH_PRIORITY, ZONE_PACER_BYPASS_PRIORITY } from "./api-client.js";
 
 const WHEEL_ZOOM_MULTIPLIER = 1.14;
 const LABEL_RENDER_ZOOM_MIN = 0.42;const DEFAULT_MAP_ZOOM = 0.7;
@@ -64,10 +65,18 @@ const MAIN_OUTLINE_COLOR = "rgba(178, 102, 255, 0.9)";
 const MAX_ZOOM = 1.5;
 const FETCH_DEBOUNCE_MS = 160;
 
-// Mirrors the server's persist-side minification: drops per-session and
-// unread fields plus zero/empty defaults. normalizeCell restores every
-// default on the way back in, so the round trip is lossless.
-const CELL_CACHE_DROP_KEYS = new Set(["m", "mine", "bid", "blendedHeight"]);
+// Mirrors the server's persist-side minification (CELL_DROP_KEYS in
+// dev_server.py): per-session and unread fields plus zero/empty defaults.
+// normalizeCell restores every default on the way back in, so the round trip
+// is lossless.
+//
+// "bid" is NOT dropped, despite what this list used to say. The server keeps
+// it on purpose - View Yard loads a base through /base/load with it - but the
+// client stripped it here before upload, so no zone in the shared cache has
+// ever carried a base id. A zone fetched live this session had one; the same
+// zone restored from cache did not, which is why anything counting or opening
+// bases from cached cells behaved inconsistently.
+const CELL_CACHE_DROP_KEYS = new Set(["m", "mine", "blendedHeight"]);
 // Avatars are only kept on main yards; outposts repeating the same URL are
 // pure cache bloat (the profile photo lookup walks all of a player's cells
 // and finds the main's copy anyway).
@@ -1361,7 +1370,7 @@ export class MapRenderer {
         ) {
           // Fresh enough for its tier (5 min for own/ally zones, up to 24h
           // for distant wilderness): keep the cached copy. This applies to
-          // every caller including sign-in and the manual refresh button -
+          // every caller including sign-in and any manual refresh -
           // "refresh allowed every X" is a hard rule, not a default.
           continue;
         }
@@ -1509,10 +1518,10 @@ export class MapRenderer {
     while (
       this.zoneQueue.length > 0 &&
       (this.zoneWorkersActive < MR2.zoneFetchConcurrency
-        // Top priority (opening a base / your own main yard) does not queue
-        // behind the in-flight panning fetches: it gets an extra slot so it
-        // goes out immediately rather than waiting for one to drain.
-        || (Number(this.zoneQueue[0]?.priority) >= 10
+        // Top tiers (an explicit reload, or your own main yard) do not queue
+        // behind the in-flight panning fetches: they get an extra slot so
+        // they go out immediately rather than waiting for one to drain.
+        || (Number(this.zoneQueue[0]?.priority) >= ZONE_PACER_BYPASS_PRIORITY
           && this.zoneWorkersActive < MR2.zoneFetchConcurrency + 2))
     ) {
       const zone = this.zoneQueue.shift();
@@ -2068,7 +2077,7 @@ export class MapRenderer {
    * skips the client pacer), and whatever the background queue is doing to
    * the same zone is harmless - last write into the cell cache wins.
    */
-  async reloadZoneNow(zone, priority = 10) {
+  async reloadZoneNow(zone, priority = FETCH_PRIORITY.zoneReload) {
     if (!this.token || !zone) {
       return false;
     }
@@ -2276,7 +2285,7 @@ export class MapRenderer {
       const midX = (points[0].x + points[1].x) / 2;
       const midY = (points[0].y + points[1].y) / 2 - 10;
       this.ctx.setLineDash([]);
-      this.ctx.font = `bold ${Math.max(12, 13 * this.zoom)}px Verdana`;
+      this.ctx.font = `bold ${Math.max(12, 13 * this.zoom)}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
       this.ctx.textAlign = "center";
       this.ctx.lineWidth = 4;
       this.ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
@@ -2758,7 +2767,7 @@ export class MapRenderer {
 
     if (labels.length) {
       this.ctx.fillStyle = "rgba(255, 255, 255, 0.34)";
-      this.ctx.font = `600 ${fontSize}px "Trebuchet MS", Verdana, sans-serif`;
+      this.ctx.font = `600 ${fontSize}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
       this.ctx.textAlign = "center";
       this.ctx.textBaseline = "middle";
       for (const label of labels) {
@@ -3074,11 +3083,14 @@ export class MapRenderer {
 
     const text = formatCompactNumber(loot);
     const fontSize = Math.max(9, Math.round(13 * this.zoom));
+    // Centred on the yard/outpost rather than hanging below it: the pill is
+    // about that cell, and below the tile it collided with the owner label
+    // and read as belonging to whatever sat underneath.
     const centerX = screenX + (MR2.cellWidth * this.zoom) / 2;
-    const textY = screenY + MR2.cellHeight * this.zoom + fontSize * 1.9;
+    const textY = screenY + (MR2.cellHeight * this.zoom) / 2;
 
     this.ctx.save();
-    this.ctx.font = `700 ${fontSize}px "Segoe UI", sans-serif`;
+    this.ctx.font = `700 ${fontSize}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
     this.ctx.textAlign = "center";
     this.ctx.textBaseline = "middle";
     const paddingX = 5;
@@ -3217,7 +3229,7 @@ export class MapRenderer {
 
     const label = `${name} (${Number(cell.l || 0)})`;
     this.ctx.save();
-    this.ctx.font = `${Math.max(11, 11 * this.zoom)}px Verdana`;
+    this.ctx.font = `${Math.max(11, 11 * this.zoom)}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
     this.ctx.textAlign = "center";
     this.ctx.fillStyle = "#ffffff";
     this.ctx.strokeStyle = strokeStyle;
@@ -3388,7 +3400,7 @@ export class MapRenderer {
   // to 10 (highest), applied globally across every signed-in user. Own bases
   // beat allied bases, and proximity to either beats open wilderness:
   //
-  //   10  the zone holding your main yard
+  //    9  the zone holding your main yard (10 is reserved for clicks)
   //    8  zones holding your outposts
   //    7  zones holding allied bases
   //    6  within 2 zones of your own bases
@@ -3402,7 +3414,10 @@ export class MapRenderer {
   zonePriorityFor(zoneX, zoneY) {
     const key = zoneKey(zoneX, zoneY);
     if (this.ownMainZones.has(key)) {
-      return 10;
+      // 9, not 10: tier 10 is reserved for requests a person is actively
+      // waiting on, so a background refresh of your own zone cannot land in
+      // front of a base you just clicked.
+      return 9;
     }
     if (this.ownOutpostZones.has(key)) {
       return 8;
