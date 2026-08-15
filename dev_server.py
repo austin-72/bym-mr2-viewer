@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import gzip
+import ipaddress
 import itertools
+import sqlite3
+from collections import deque
 import json
 import os
 import sys
@@ -12,8 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,7 +27,11 @@ STATIC_DIR = Path(os.environ.get("STATIC_DIR", REPO_ROOT / "app" / "static")).re
 # Storage root for the shared map cache (server_{name}/) and per-user data
 # (users/{username}/). Defaults to the repo root, i.e. bym-mr2-viewer\.
 STORAGE_ROOT = Path(os.environ.get("STORAGE_DIR", REPO_ROOT)).resolve()
-HOST = os.environ.get("HOST", "0.0.0.0")
+# Loopback by default: cloudflared connects over it, and binding anywhere
+# else would let the internet reach this server directly - which would also
+# make CF-Connecting-IP spoofable and every ban trivially evadable.
+# Override only for a deliberately LAN-exposed dev box.
+HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8080"))
 
 MAX_BODY_BYTES = 32 * 1024 * 1024
@@ -65,6 +71,32 @@ SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\- ]+")
 # Redacts the value of any password field in a logged request body, whether it
 # arrived form-encoded (password=...) or as JSON ("password": "...").
 API_LOG_PASSWORD_RE = re.compile(r'(password=|"password"\s*:\s*")[^&"]*', re.IGNORECASE)
+# Session tokens are credentials. The game's token IS the login - anyone
+# holding it can act as that account until it expires (observed: ~30 days) -
+# and it is echoed in getinfo responses AND sent as a query parameter on every
+# getarea call, so a single day's log can contain it hundreds of times. Logs
+# get shared when asking for help, which is exactly when this leaks.
+# Redacted by default; set BYM_API_LOG_TOKENS=1 to keep them when a
+# reproduction genuinely needs the original token.
+API_LOG_KEEP_TOKENS = os.environ.get("BYM_API_LOG_TOKENS", "").strip().lower() in ("1", "true", "yes")
+# JWT-shaped values, wherever they appear (request body, query string, or an
+# echoed response), plus explicit token fields for non-JWT formats.
+API_LOG_JWT_RE = re.compile(r'eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+')
+API_LOG_TOKEN_FIELD_RE = re.compile(r'(token=|"token"\s*:\s*")[^&"]*', re.IGNORECASE)
+# The account email is PII and is echoed back by player/getinfo even when the
+# request never carried it. Redacted with the same switch as tokens: it is
+# identity, not something a reproduction needs.
+API_LOG_EMAIL_FIELD_RE = re.compile(r'(email=|"email"\s*:\s*")[^&"]*', re.IGNORECASE)
+
+
+def api_log_redact(text: str) -> str:
+    """Strips credentials from a logged request or response body."""
+    text = API_LOG_PASSWORD_RE.sub(r"\1<redacted>", text)
+    if not API_LOG_KEEP_TOKENS:
+        text = API_LOG_JWT_RE.sub("<redacted-jwt>", text)
+        text = API_LOG_TOKEN_FIELD_RE.sub(r"\1<redacted>", text)
+        text = API_LOG_EMAIL_FIELD_RE.sub(r"\1<redacted>", text)
+    return text
 
 # ---------------------------------------------------------------------------
 # API-call logging configuration (BYM_API_LOG environment variable).
@@ -234,13 +266,16 @@ SEED_ADMIN_USERS = {
 BYM_BASE_URL = os.environ.get("BYM_BASE_URL", "https://server.bymrefitted.com").rstrip("/")
 
 # How hidden players' tiles are disguised for non-exempt viewers:
-#   blend (default) - the tile takes the height of the surrounding plain
-#                     terrain, so it looks like ordinary local ground
+#   tribe (default) - the tile is replaced with the wild monster cell that
+#                     coordinate generates, so it reads as ordinary wilderness
 #   water           - the tile is rendered as a water hex
+# "blend" is the old name for the default and still accepted: it described the
+# previous behaviour, which averaged the surrounding heights. That approach is
+# gone (see anonymize_hidden_cells), so the value is named for what it does.
 HIDDEN_TILE_STYLE = (
     "water"
-    if os.environ.get("BYM_HIDDEN_TILE_STYLE", "blend").strip().lower() == "water"
-    else "blend"
+    if os.environ.get("BYM_HIDDEN_TILE_STYLE", "tribe").strip().lower() == "water"
+    else "tribe"
 )
 HIDDEN_WATER_HEIGHT = 60  # water1 band, matching natural lakes
 
@@ -443,6 +478,13 @@ METRICS_TODAY: dict = {"day": "", "hours": {}, "users": {}}
 METRICS_TODAY_DIRTY = False
 METRICS_FLUSH_SECONDS = 15.0
 
+# Hourly counters that are peaks, not running totals. metric_wait stores
+# waitMaxMs with max() per hour, so summing it across hours and days -- which
+# is what every other counter here wants -- reports the sum of the hourly
+# peaks as the peak. Over a 30-day report with traffic in every hour that
+# overstates the worst wait by up to ~720x. Aggregate these with max instead.
+METRICS_MAX_COUNTERS = frozenset({"waitMaxMs"})
+
 
 def metrics_dir() -> "Path":
     path = STORAGE_ROOT / "metrics"
@@ -491,17 +533,35 @@ def _read_day(day: str) -> dict:
     return data
 
 
-def _write_day(bucket: dict) -> None:
+def _write_day(bucket: dict) -> bool:
+    """Returns True when the rollup is safely on disk, so the caller knows
+    whether it may clear the dirty flag."""
     day = bucket.get("day")
     if not day:
-        return
+        return False
     path = _day_path(day)
-    tmp = path.with_suffix(".tmp")
+    # A private temp name per writer. metrics_flush() deliberately drops
+    # METRICS_LOCK before writing, while the midnight rotation in
+    # _today_bucket() writes while holding it, so the background writer and a
+    # request thread calling usage_report() can land here at the same moment.
+    # On one shared "usage-<day>.tmp" that interleaves into a torn file.
+    # The suffix keeps it clear of the usage-*.json globs.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp.write_text(json.dumps(bucket, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(path)
+        try:
+            os.chmod(tmp, 0o600)   # owner-only; see atomic_write_json
+        except OSError:
+            pass
+        tmp.replace(path)          # atomic; removes tmp on success
+        return True
     except OSError as error:
         print(f"[metrics] could not write {path.name}: {error}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 def metrics_flush(force: bool = False) -> None:
@@ -511,8 +571,14 @@ def metrics_flush(force: bool = False) -> None:
         if not METRICS_TODAY_DIRTY and not force:
             return
         bucket = json.loads(json.dumps(METRICS_TODAY))
-        METRICS_TODAY_DIRTY = False
-    _write_day(bucket)
+    # Clear the flag only once the bytes are down. Clearing it before the
+    # write meant a failed write (full disk, bad permissions) silently
+    # discarded the hour: _write_day swallows OSError, so nothing retried and
+    # nothing was logged beyond one line. Leaving it set means the next
+    # 15-second tick tries again.
+    if _write_day(bucket):
+        with METRICS_LOCK:
+            METRICS_TODAY_DIRTY = False
 
 
 def metrics_prune_files() -> int:
@@ -532,6 +598,210 @@ def metrics_prune_files() -> int:
     except OSError:
         pass
     return removed
+
+
+# ---------------------------------------------------------------------------
+# Leaderboard history: once per UTC day, per world, snapshot every player's
+# cached outpost count (keyed by uid - names change, uids do not). The 1/7/30
+# day columns are computed cache-vs-cache: today's fresh scan minus the
+# nearest snapshot at or before (today - k). An hourly check (plus one at
+# startup) writes the day file if missing, so downtime self-heals; files
+# older than the retention window are pruned at write time.
+# ---------------------------------------------------------------------------
+HISTORY_RETENTION_DAYS = 31
+HISTORY_CHECK_SECONDS = 3600
+HISTORY_CELL_OUTPOST = 3
+HISTORY_MEMO: dict = {}
+HISTORY_MEMO_LOCK = threading.Lock()
+HISTORY_MEMO_TTL_SECONDS = 300
+
+
+def history_dir(world: str) -> Path:
+    return STORAGE_ROOT / f"server_{world}" / "history"
+
+
+def history_outpost_counts(world: str) -> dict:
+    """{uid(str): {"n": latest name, "c": outpost count}} from cached zones."""
+    counts: dict = {}
+    zones_dir = STORAGE_ROOT / f"server_{world}" / "zones"
+    if not zones_dir.is_dir():
+        return counts
+    for path in zones_dir.glob("zone_*.json"):
+        payload = read_json(path, None)
+        cells = payload.get("cells") if isinstance(payload, dict) else None
+        if not isinstance(cells, list):
+            continue
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            try:
+                if int(cell.get("b", 0) or 0) != HISTORY_CELL_OUTPOST:
+                    continue
+                uid = int(cell.get("uid", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0:
+                continue
+            entry = counts.setdefault(str(uid), {"n": "", "c": 0})
+            entry["c"] += 1
+            name = str(cell.get("n", "") or "").strip()
+            if name:
+                entry["n"] = name
+    return counts
+
+
+def history_world_ids() -> list:
+    worlds = []
+    for path in STORAGE_ROOT.glob("server_*"):
+        if path.is_dir() and (path / "zones").is_dir():
+            worlds.append(path.name[len("server_"):])
+    return worlds
+
+
+def history_prune(world: str) -> None:
+    hdir = history_dir(world)
+    if not hdir.is_dir():
+        return
+    today = date.fromisoformat(_utc_day())
+    for path in hdir.glob("*.json"):
+        try:
+            day = date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if (today - day).days > HISTORY_RETENTION_DAYS:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def write_history_snapshot(world: str) -> bool:
+    day = _utc_day()
+    path = history_dir(world) / f"{day}.json"
+    if path.exists():
+        return False
+    counts = history_outpost_counts(world)
+    atomic_write_json(path, {"day": day, "builtAt": time.time(), "counts": counts})
+    history_prune(world)
+    print(f"[history] snapshot {world} {day}: {len(counts)} players")
+    return True
+
+
+def history_snapshot_all() -> None:
+    for world in history_world_ids():
+        try:
+            write_history_snapshot(world)
+        except Exception as error:            # never take the server down
+            print(f"[history] snapshot failed for {world}: {error}")
+
+
+def _history_writer_loop() -> None:
+    while True:
+        time.sleep(HISTORY_CHECK_SECONDS)
+        try:
+            history_snapshot_all()
+        except Exception as error:
+            print(f"[history] hourly check failed: {error}")
+
+
+def start_history_writer() -> None:
+    try:
+        history_snapshot_all()
+    except Exception as error:
+        print(f"[history] startup snapshot failed: {error}")
+    thread = threading.Thread(target=_history_writer_loop, daemon=True,
+                              name="leaderboard-history")
+    thread.start()
+
+
+def leaderboard_history(world: str) -> dict:
+    """Cache-vs-cache deltas for 1/7/30 days, memoised briefly."""
+    now = time.time()
+    with HISTORY_MEMO_LOCK:
+        cached = HISTORY_MEMO.get(world)
+        if cached and now - cached["at"] < HISTORY_MEMO_TTL_SECONDS:
+            return cached["payload"]
+
+    current = history_outpost_counts(world)
+    hdir = history_dir(world)
+    days = sorted(p.stem for p in hdir.glob("*.json")) if hdir.is_dir() else []
+    today = date.fromisoformat(_utc_day())
+
+    windows: dict = {}
+    names = {uid: entry["n"] for uid, entry in current.items() if entry["n"]}
+    for k in (1, 7, 30):
+        target = (today - timedelta(days=k)).isoformat()
+        base_day = None
+        for day in days:
+            if day <= target and (base_day is None or day > base_day):
+                base_day = day
+        if base_day is None:
+            windows[str(k)] = None
+            continue
+        base = read_json(hdir / f"{base_day}.json", None)
+        base_counts = base.get("counts") if isinstance(base, dict) else None
+        if not isinstance(base_counts, dict):
+            windows[str(k)] = None
+            continue
+        deltas: dict = {}
+        for uid, entry in current.items():
+            deltas[uid] = entry["c"] - int((base_counts.get(uid) or {}).get("c", 0) or 0)
+        for uid, entry in base_counts.items():
+            if uid not in current:
+                deltas[uid] = -int((entry or {}).get("c", 0) or 0)
+                name = str((entry or {}).get("n", "") or "").strip()
+                if name and uid not in names:
+                    names[uid] = name
+        windows[str(k)] = {"baseDay": base_day, "deltas": deltas}
+
+    # Raw day-by-day series for CSV export: every stored day (ascending)
+    # and each uid's count on that day (absent = not snapshotted/0).
+    series_days = days[-HISTORY_RETENTION_DAYS:]
+    series_counts: dict = {}
+    for day in series_days:
+        day_data = read_json(hdir / f"{day}.json", None)
+        day_counts = day_data.get("counts") if isinstance(day_data, dict) else None
+        if not isinstance(day_counts, dict):
+            continue
+        for uid, entry in day_counts.items():
+            series_counts.setdefault(uid, {})[day] = int((entry or {}).get("c", 0) or 0)
+            name = str((entry or {}).get("n", "") or "").strip()
+            if name and uid not in names:
+                names[uid] = name
+    payload = {"world": world, "today": today.isoformat(),
+               "windows": windows, "names": names,
+               "series": {"days": series_days, "counts": series_counts}}
+    with HISTORY_MEMO_LOCK:
+        HISTORY_MEMO[world] = {"at": now, "payload": payload}
+    return payload
+
+
+def save_baseload_capture(request_body, payload: bytes) -> None:
+    """Archive the latest /base/load response per player.
+
+    One file per player: baseloads/{uid}.json, where uid is the viewed
+    base owner's userid from the response. A newer load of any of the
+    player's bases overwrites the previous file, so the directory always
+    holds each player's most recent snapshot. Obvious error responses
+    and payloads without a userid are skipped.
+    """
+    parsed = None
+    try:
+        parsed = json.loads(payload.decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return                       # not JSON: nothing analysable
+    if not isinstance(parsed, dict) or parsed.get("error"):
+        return
+    uid = str(parsed.get("userid", "") or parsed.get("saveuserid", "") or "").strip()
+    uid = re.sub(r"[^0-9]", "", uid)
+    if not uid or uid == "0":
+        return
+    out_dir = STORAGE_ROOT / "baseloads"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{uid}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(payload)
+    tmp.replace(path)
 
 
 def _metrics_writer_loop() -> None:
@@ -589,6 +859,10 @@ def usage_report(day_from: str, day_to: str) -> dict:
         day_counters: dict = {}
         for hour, counters in sorted(data.get("hours", {}).items()):
             for name, count in counters.items():
+                if name in METRICS_MAX_COUNTERS:
+                    totals[name] = max(totals.get(name, 0), count)
+                    day_counters[name] = max(day_counters.get(name, 0), count)
+                    continue
                 totals[name] = totals.get(name, 0) + count
                 day_counters[name] = day_counters.get(name, 0) + count
                 if name == "total":
@@ -806,6 +1080,32 @@ SETTINGS_FIELD_RULES = {
     # How many days of hourly usage history to keep on disk. Files past this
     # are deleted on startup; roughly 20-40 KB per day.
     "metricsRetentionDays": (30, 1, 400),
+    # --- Honeypot bans -------------------------------------------------
+    # 1: a request for a honeypot path (see HONEYPOT_PATTERNS) bans the
+    # client IP for banFirstMinutes, doubling on repeat up to banMaxMinutes.
+    # 0: honeypot hits are counted and logged but nothing is blocked, which
+    # is the setting to run first - watch banHistory for a day and confirm
+    # nothing legitimate is being caught before switching this on.
+    "honeypotBansEnabled": (0, 0, 1),
+    "banFirstMinutes": (60, 1, 10080),
+    "banMaxMinutes": (10080, 1, 525600),   # one week default, one year ceiling
+    # Repeat offences double the previous term. An IP is "repeat" while its
+    # record is remembered, which is banMaxMinutes past its last expiry.
+    "banStrikeDecayHours": (168, 1, 8760),
+    # --- Operator console ----------------------------------------------
+    # Hours of request history kept in admin/ops.db. 48h of a quiet site
+    # is a few MB; the writer prunes past this every 5 minutes.
+    "opsLogRetentionHours": (48, 1, 8760),
+    # What still reaches stdout once the console exists:
+    #   2 = every request, as before
+    #   1 = only errors (>=400) and non-tunnel requests  [default]
+    #   0 = nothing per-request; startup, warnings and [tunnel]/[honeypot]
+    #       notices only
+    # The point of the console is that the terminal no longer has to be read,
+    # so the default is quiet enough to leave a journal running without it
+    # filling up. Every request is still recorded either way - this controls
+    # printing, never recording.
+    "journalRequestLines": (1, 0, 2),
 }
 
 
@@ -1046,7 +1346,68 @@ def acquire_bym_slot(priority: int = BYM_PRIORITY_MIN, user_key: str = "anon") -
             except ValueError:
                 pass
             BYM_CALL_LOCK.notify_all()
-BYM_API_VERSION = os.environ.get("BYM_API_VERSION", "v1.6.8-beta").strip("/")
+# The game's API path embeds the version (/api/v1.6.8-beta/...), so pinning it
+# means every BYMR release 404s the viewer until someone edits the env var. The
+# official launcher does not pin: it reads currentGameVersion from the CDN
+# manifest and builds the path from that. Do the same, with the pin kept as an
+# override for testing against a specific version.
+BYM_VERSION_MANIFEST = os.environ.get(
+    "BYM_VERSION_MANIFEST", "cdn.bymrefitted.com/versionManifest.json"
+).lstrip("/")
+BYM_API_VERSION_PIN = os.environ.get("BYM_API_VERSION", "").strip("/")
+BYM_API_VERSION_FALLBACK = "v1.6.9-beta"
+# Re-checked periodically: the process can outlive a game release.
+BYM_VERSION_TTL = 3600
+_BYM_VERSION = {"value": "", "checked": 0.0}
+_BYM_VERSION_LOCK = threading.Lock()
+
+
+def bym_api_version(force: bool = False) -> str:
+    """The API version segment, discovered from the CDN manifest.
+
+    Read-only GET to the CDN. It touches no game account, mints no token and
+    is not authenticated - the launcher fetches the same file before login.
+
+    HTTPS first, then HTTP, matching the launcher. On any failure the last
+    known good value is reused, falling back to the pin so a CDN outage
+    degrades to current behaviour rather than taking the viewer down.
+    """
+    if BYM_API_VERSION_PIN:
+        return BYM_API_VERSION_PIN
+    now = time.time()
+    with _BYM_VERSION_LOCK:
+        cached = _BYM_VERSION["value"]
+        if cached and not force and (now - _BYM_VERSION["checked"]) < BYM_VERSION_TTL:
+            return cached
+        # Mark the attempt before releasing, so a burst of requests does not
+        # each fire their own manifest fetch on a cold start.
+        _BYM_VERSION["checked"] = now
+    for scheme in ("https", "http"):
+        try:
+            request = urllib.request.Request(
+                f"{scheme}://{BYM_VERSION_MANIFEST}",
+                headers={"User-Agent": BYM_USER_AGENT, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+            version = str(payload.get("currentGameVersion") or "").strip()
+            if version:
+                resolved = f"v{version}-beta"
+                with _BYM_VERSION_LOCK:
+                    if resolved != _BYM_VERSION["value"]:
+                        print(f"[bym] game version {version} -> /api/{resolved}")
+                    _BYM_VERSION["value"] = resolved
+                return resolved
+        except Exception as error:
+            last = error
+            continue
+    with _BYM_VERSION_LOCK:
+        stale = _BYM_VERSION["value"]
+    if stale:
+        return stale
+    print(f"[bym] version manifest unavailable ({last}); "
+          f"falling back to {BYM_API_VERSION_FALLBACK}")
+    return BYM_API_VERSION_FALLBACK
 # The game server is behind Cloudflare, which rejects the default
 # "Python-urllib/x.y" User-Agent with error 1010 ("banned browser signature").
 # Identify honestly to the BYM servers: a distinct product token lets the
@@ -1070,6 +1431,10 @@ TOKEN_CACHE_TTL = 600  # seconds
 PROXY_TIMEOUT = 20  # seconds for upstream game-API requests via /proxy
 TOKEN_CACHE: dict = {}
 TOKEN_CACHE_LOCK = threading.Lock()
+# Why the last verification of a given token failed: "expired" (rejected - sign
+# in again), "rejected" (server refused for another reason), "transport" (never
+# reached it). Read by token_failure_reason(); guarded by TOKEN_CACHE_LOCK.
+LAST_TOKEN_FAILURE: dict = {}
 
 
 def verify_bym_token(token: str):
@@ -1101,7 +1466,16 @@ def verify_bym_token(token: str):
     metric_inc("cat:auth")
     # player/getinfo is priority 10 (it is the login/session call); it is
     # recorded against the window rather than queued, so it never blocks.
-    verify_url = f"{BYM_BASE_URL}/api/{BYM_API_VERSION}/player/getinfo"
+    verify_url = f"{BYM_BASE_URL}/api/{bym_api_version()}/player/getinfo"
+    # How the verification failed, so callers can tell "log in again" from
+    # "the game server is unreachable". Mirrors the launcher's split between
+    # SessionExpired (the token was rejected - rotation moved past us, clear
+    # it and re-authenticate) and AuthError (everything else).
+    #   ""          verified
+    #   "expired"   token rejected; the client should sign in again
+    #   "rejected"  reached the server, but it refused for another reason
+    #   "transport" never got an answer; the token may still be perfectly good
+    failure = "transport"
     try:
         request = urllib.request.Request(
             verify_url,
@@ -1120,6 +1494,14 @@ def verify_bym_token(token: str):
         minted = str(payload.get("token", "")).strip()
         if candidate and not payload.get("error"):
             username = candidate
+            failure = ""
+            # The game keys identity on the immutable numeric userid; the
+            # username is just its current label (renames are allowed). This
+            # response came from the game server itself, so the pair is
+            # authoritative - record it, and if the name moved since it was
+            # last seen, migrate every per-name store BEFORE the caller acts
+            # on the new name (whitelist checks, users/{name}/ reads, ...).
+            record_user_identity(payload.get("userid", payload.get("userId", 0)), username)
             # Now that the owner is known, charge the getinfo call we already
             # counted globally to their per-minute window too.
             attribute_bym_call(f"user:{username.lower()}")
@@ -1128,6 +1510,7 @@ def verify_bym_token(token: str):
         else:
             # 200 OK but no usable username (e.g. the game server returned an
             # error field or an empty name). Log what it actually said.
+            failure = "expired"
             print(f"[admin] token verification: {verify_url} returned no username: {payload!r}")
     except urllib.error.HTTPError as error:
         # 4xx/5xx from the game server - read the body so the reason (bad API
@@ -1136,28 +1519,54 @@ def verify_bym_token(token: str):
             detail = error.read().decode("utf-8", "replace")[:300]
         except Exception:  # noqa: BLE001
             detail = "<no body>"
+        # 401/403 is the token being refused; anything else (404 from a stale
+        # API version, 5xx) is not the player's fault and must not present as
+        # "your session expired".
+        failure = "expired" if error.code in (401, 403) else "rejected"
+        if error.code == 404:
+            # A version bump moves the API path, so re-check the manifest
+            # rather than serving 404s until the process restarts.
+            bym_api_version(force=True)
         print(f"[admin] token verification failed: HTTP {error.code} from {verify_url}: {detail}")
     except Exception as error:  # noqa: BLE001 - TLS/DNS/timeout/etc = not authed
         # Common here: SSLCertVerificationError when the Python host lacks a CA
         # bundle even though a browser (with its own trust store) can reach the
         # same URL. Also covers DNS failures, timeouts, and blocked egress.
+        failure = "transport"
         print(f"[admin] token verification failed: {error!r} ({verify_url})")
 
     with TOKEN_CACHE_LOCK:
-        # Cache failures briefly too, so a bad token cannot hammer the BYM server.
-        entry = (username, current_token, now + (TOKEN_CACHE_TTL if username else 60))
-        TOKEN_CACHE[token] = entry
-        if username and current_token != token:
-            # Recognise the minted token on the next request without re-minting.
-            TOKEN_CACHE[current_token] = entry
+        # Cache failures briefly too, so a bad token cannot hammer the BYM
+        # server - but never cache a transport failure. Doing so pins a good
+        # token as "invalid" for a minute because the network blipped once.
+        if username or failure != "transport":
+            entry = (username, current_token, now + (TOKEN_CACHE_TTL if username else 60))
+            TOKEN_CACHE[token] = entry
+            if username and current_token != token:
+                # Recognise the minted token on the next request without re-minting.
+                TOKEN_CACHE[current_token] = entry
         if len(TOKEN_CACHE) > 500:
             for key in list(TOKEN_CACHE)[:100]:
                 TOKEN_CACHE.pop(key, None)
+        LAST_TOKEN_FAILURE[token] = failure
+        if len(LAST_TOKEN_FAILURE) > 500:
+            for key in list(LAST_TOKEN_FAILURE)[:100]:
+                LAST_TOKEN_FAILURE.pop(key, None)
     return (username, current_token)
+
+
+def token_failure_reason(token: str) -> str:
+    """Why verify_bym_token() last rejected this token; "" if it verified.
+
+    Lets a caller answer "your session expired, sign in again" only when the
+    game server actually said so, rather than for a DNS blip.
+    """
+    with TOKEN_CACHE_LOCK:
+        return LAST_TOKEN_FAILURE.get(str(token or "").strip(), "")
 
 # Bumped whenever server-side routes change, so clients can detect that a
 # stale dev_server.py process is still running after an update.
-SERVER_VERSION = "2026-07-26-priority-bands-usage-history"
+SERVER_VERSION = "2026-08-03-username-changes"
 
 AUDIT_LIMIT = 500
 
@@ -1269,11 +1678,37 @@ def sanitize_name(raw: str) -> str | None:
 
 
 def atomic_write_json(path: Path, payload: object) -> None:
+    # The temp name must be unique per writer. This runs under
+    # ThreadingHTTPServer, so two requests touching the same file (two admins
+    # saving settings, two zone uploads for one cache file) otherwise both
+    # write "<name>.tmp" and both rename it: one truncates the other's
+    # half-written file, and os.replace on an already-renamed temp raises
+    # FileNotFoundError. Under load that surfaces as lost saves and, briefly,
+    # an unreadable file for anyone reading concurrently.
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-    os.replace(temp_path, path)
+    temp_path = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        # Owner-only, set on the temp file BEFORE the rename so the finished
+        # file is never briefly world-readable. Storage holds session records,
+        # login history, the whitelist and per-user settings; on a shared or
+        # multi-user host the default 0644 exposes all of it to any local
+        # account. Best-effort: Windows ignores the mode bits, and a failure
+        # here must not lose the write.
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def read_json(path: Path, fallback: object) -> object:
@@ -1288,9 +1723,17 @@ def read_json(path: Path, fallback: object) -> object:
 #   m    - monster-housing blob; the viewer never reads it and it dominates size
 #   mine - per-session ownership flag; sharing it would paint one user's bases
 #          blue for everyone (the client re-derives it from uid)
+#   hiddenDisguise - per-session render memo naming the wild monster cell a
+#          moderation-hidden base is masquerading as. The client drops it
+#          (map-renderer.js CELL_CACHE_DROP_KEYS) because uploading it leaks
+#          which cells are hidden and which tribe they pretend to be, but the
+#          server minifies whatever a client actually sends, so the rule has
+#          to exist on both sides -- exactly the client/server disagreement
+#          that let bid get stripped. It also holds a *reference* to another
+#          cell object, so persisting it nests a whole record.
 # bid (the base id string) is KEPT: the View Yard/Outpost feature loads a
 # base via /base/load with it, so cached cells must carry it.
-CELL_DROP_KEYS = {"m", "mine", "blendedHeight"}
+CELL_DROP_KEYS = {"m", "mine", "blendedHeight", "hiddenDisguise"}
 # Avatar-ish fields are only meaningful once per player; keeping them on the
 # main yard alone shrinks cached zones (outposts of prolific players would
 # otherwise repeat the same URL dozens of times).
@@ -1371,7 +1814,7 @@ def known_world_ids():
     # Server-wide cache refresh on a TTL, not attributable to any one player:
     # global window only, by design.
     record_bym_call()
-    worlds_url = f"{BYM_BASE_URL}/api/{BYM_API_VERSION}/worlds"
+    worlds_url = f"{BYM_BASE_URL}/api/{bym_api_version()}/worlds"
     try:
         request = urllib.request.Request(
             worlds_url,
@@ -1403,6 +1846,336 @@ def server_map_dir(server_name: str) -> Path:
 
 def user_dir(username: str) -> Path:
     return STORAGE_ROOT / "users" / username
+
+
+# ---------------------------------------------------------------------------
+# Username changes.
+#
+# BYM Refitted allows a player to rename their account (once per cooldown
+# period). The game keeps identity on the immutable numeric `userid`; only the
+# display name moves. This viewer historically keyed EVERYTHING on the name -
+# users/{name}/ storage, alliance rosters, the admin allowlist, the sign-in
+# whitelist, hidden players, hide requests and per-world activity - so a
+# rename used to silently orphan all of it.
+#
+# The fix is an identity index, users_index.json at the storage root (NOT
+# inside users/, where a player literally named "index.json" could collide):
+#
+#   {"<userid>": {"name": "Current", "previous": ["Old", ...], "updatedAt"}}
+#
+# The index is fed ONLY from player/getinfo responses that came from the game
+# server itself (token verification, and successful sign-ins relayed through
+# /proxy). It is never fed from client-posted map cells: zone uploads are
+# authenticated but their CONTENT is client-supplied, so trusting a cell's
+# uid->name pair to drive a rename would let any signed-in user forge a cell
+# claiming an admin's uid now carries the attacker's name - and the migration
+# below would then hand them the admin allowlist entry. Verification-driven
+# renames close the moment the renamed player next touches the viewer, which
+# is exactly when their per-name data starts to matter again.
+#
+# When a verified (userid, name) disagrees with the index, migrate_username()
+# rewrites every copy of the old name the viewer owns - the same contract the
+# game server's renameUser service applies to its own tables. Renames that
+# predate this index (no recorded uid to compare against) can be applied by
+# hand from the admin console (POST /api/admin/rename-user).
+# ---------------------------------------------------------------------------
+USERS_INDEX_FILE = "users_index.json"
+
+
+def users_index_path() -> Path:
+    return STORAGE_ROOT / USERS_INDEX_FILE
+
+
+def load_users_index() -> dict:
+    index = read_json(users_index_path(), {})
+    return index if isinstance(index, dict) else {}
+
+
+def resolve_current_name(name: str) -> str:
+    """The CURRENT username for a possibly out-of-date one, from the index.
+
+    Returns "" when the name is not a recorded previous name of anyone. A
+    name that is somebody's current name resolves to itself, so callers can
+    treat any non-empty result as authoritative.
+    """
+    low = str(name or "").strip().lower()
+    if not low:
+        return ""
+    for entry in load_users_index().values():
+        if not isinstance(entry, dict):
+            continue
+        current = str(entry.get("name", "")).strip()
+        if current.lower() == low:
+            return current
+        for previous in entry.get("previous", []):
+            if str(previous).strip().lower() == low:
+                return current
+    return ""
+
+
+def _rename_in_name_list(items, old_low: str, new: str):
+    """Replaces old_low (case-insensitive) with new in a list of names.
+
+    Returns (new_list, changed). Deduplicates a pre-existing copy of the new
+    name so a half-applied earlier migration cannot leave the name twice.
+    """
+    if not isinstance(items, list):
+        return (items, False)
+    out, changed, seen_new = [], False, False
+    for item in items:
+        text = str(item)
+        if text.strip().lower() == old_low:
+            changed = True
+            if not seen_new:
+                out.append(new)
+                seen_new = True
+            continue
+        if text.strip().lower() == new.strip().lower():
+            if seen_new:
+                changed = True
+                continue
+            seen_new = True
+        out.append(item)
+    return (out, changed)
+
+
+def migrate_username_locked(old: str, new: str) -> dict:
+    """Moves every viewer-owned copy of a username. Caller holds STORAGE_LOCK.
+
+    Mirrors the game server's renameUser transaction for the viewer's own
+    stores: the users/{name}/ directory, alliance files (leader, members,
+    invites, enemies, the ranks map, chat authors and feed participants), the
+    admin allowlist, the sign-in whitelist, hidden players, hide requests and
+    per-world activity records. Returns a summary dict for logging/auditing.
+    """
+    old = str(old or "").strip()
+    new = str(new or "").strip()
+    summary = {"from": old, "to": new, "userDir": "none", "alliances": 0,
+               "admins": False, "whitelist": False, "hidden": False,
+               "hideRequests": 0, "activityWorlds": 0}
+    if not old or not new or old == new:
+        return summary
+    old_low = old.lower()
+    new_case_only = old_low == new.lower()
+
+    # --- users/{old} -> users/{new} ------------------------------------
+    old_safe = sanitize_name(old)
+    new_safe = sanitize_name(new)
+    if old_safe and new_safe:
+        old_dir = user_dir(old_safe)
+        new_dir = user_dir(new_safe)
+        if new_case_only:
+            # Case-only rename. On a case-insensitive filesystem (Windows -
+            # this project ships start.bat) both paths are the same directory
+            # and rename() just fixes the stored casing; on Linux it is a
+            # normal move. Either way there is nothing to archive.
+            try:
+                if old_dir.is_dir() and old_safe != new_safe:
+                    old_dir.rename(new_dir)
+                    summary["userDir"] = "moved"
+            except OSError as error:  # noqa: PERF203 - one-shot, log and go on
+                print(f"[rename] could not recase users/{old_safe}: {error!r}")
+        elif old_dir.is_dir():
+            if new_dir.exists():
+                # Stale data from a PREVIOUS holder of the new name (names are
+                # unique in the game at any instant, so this can only be
+                # leftovers). Park it outside users/ - the admin overview
+                # lists every users/ entry as a viewer account - rather than
+                # merging two different players' histories.
+                archive_root = STORAGE_ROOT / "users_archived"
+                archive_root.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                try:
+                    new_dir.rename(archive_root / f"{new_safe}-{stamp}")
+                except OSError as error:
+                    print(f"[rename] could not archive users/{new_safe}: {error!r}")
+            try:
+                old_dir.rename(new_dir)
+                summary["userDir"] = "moved"
+            except OSError as error:
+                print(f"[rename] could not move users/{old_safe} -> users/{new_safe}: {error!r}")
+        elif new_dir.is_dir():
+            summary["userDir"] = "already"
+
+    # --- Alliance files -------------------------------------------------
+    alliances = STORAGE_ROOT / "alliances"
+    if alliances.is_dir():
+        for path in sorted(alliances.glob("*.json")):
+            data = read_json(path, None)
+            if not isinstance(data, dict):
+                continue
+            changed = False
+            if str(data.get("leader", "")).strip().lower() == old_low:
+                data["leader"] = new
+                changed = True
+            for field in ("members", "invites", "enemies"):
+                replaced, did = _rename_in_name_list(data.get(field), old_low, new)
+                if did:
+                    data[field] = replaced
+                    changed = True
+            ranks = data.get("ranks")
+            if isinstance(ranks, dict) and old_low in ranks and not new_case_only:
+                # Ranks are keyed by lowercased name; leader stays out of the
+                # map, mirroring member_rank(). Never clobber an existing rank
+                # under the new key (dedupe from a half-applied migration).
+                ranks.setdefault(new.lower(), ranks.pop(old_low))
+                ranks.pop(old_low, None)
+                changed = True
+            chat = data.get("chat")
+            if isinstance(chat, list):
+                for message in chat:
+                    if isinstance(message, dict) and str(message.get("from", "")).strip().lower() == old_low:
+                        message["from"] = new
+                        changed = True
+            feed = data.get("feed")
+            if isinstance(feed, list):
+                for event in feed:
+                    if not isinstance(event, dict):
+                        continue
+                    for field in ("playerName", "otherParty", "by"):
+                        if str(event.get(field, "")).strip().lower() == old_low:
+                            event[field] = new
+                            changed = True
+            if changed:
+                atomic_write_json(path, data)
+                summary["alliances"] += 1
+
+    # --- Admin allowlist -------------------------------------------------
+    admins_path = admin_dir() / "admins.json"
+    payload = read_json(admins_path, None)
+    names = payload.get("admins") if isinstance(payload, dict) else None
+    if isinstance(names, list):
+        replaced, did = _rename_in_name_list(names, old_low, new)
+        if did:
+            atomic_write_json(admins_path, {"admins": sorted(
+                {str(n).strip() for n in replaced if str(n).strip()}, key=str.lower)})
+            summary["admins"] = True
+
+    # --- Sign-in whitelist ----------------------------------------------
+    whitelist_path = admin_dir() / "whitelist.json"
+    data = read_json(whitelist_path, None)
+    if isinstance(data, dict):
+        replaced, did = _rename_in_name_list(data.get("names"), old_low, new)
+        if did:
+            data["names"] = sorted({str(n).strip() for n in replaced if str(n).strip()},
+                                   key=str.lower)
+            atomic_write_json(whitelist_path, data)
+            summary["whitelist"] = True
+
+    # --- Hidden players ---------------------------------------------------
+    players = load_hidden_players()
+    changed = False
+    for entry in players:
+        if isinstance(entry, dict) and str(entry.get("name", "")).strip().lower() == old_low:
+            entry["name"] = new
+            changed = True
+    if changed:
+        atomic_write_json(admin_dir() / "hidden_players.json", {"players": players})
+        summary["hidden"] = True
+
+    # --- Hide requests ----------------------------------------------------
+    requests_path = admin_dir() / "hide-requests.json"
+    requests = read_json(requests_path, [])
+    if isinstance(requests, list):
+        changed = 0
+        for entry in requests:
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip().lower() == old_low:
+                entry["name"] = new
+                changed += 1
+        if changed:
+            atomic_write_json(requests_path, requests)
+            summary["hideRequests"] = changed
+
+    # --- Per-world activity (keyed by lowercased name) --------------------
+    if not new_case_only:
+        for server_dir in sorted(STORAGE_ROOT.glob("server_*")):
+            activity_path = server_dir / "activity.json"
+            data = read_json(activity_path, None)
+            if not isinstance(data, dict) or old_low not in data:
+                continue
+            moved = data.pop(old_low)
+            existing = data.get(new.lower())
+            if isinstance(existing, dict) and isinstance(moved, dict):
+                # Both names have records (stale data from a previous holder
+                # of the new name). Keep whichever observation is newer, but
+                # never lose the older "last increased" stamp entirely.
+                newer = moved if int(moved.get("inc", 0) or 0) >= int(existing.get("inc", 0) or 0) else existing
+                data[new.lower()] = newer
+            else:
+                data[new.lower()] = moved
+            atomic_write_json(activity_path, data)
+            summary["activityWorlds"] += 1
+
+    return summary
+
+
+def rename_token_cache(old: str, new: str) -> None:
+    """Points live cached sessions for old at new, keeping them signed in."""
+    old_low = str(old or "").strip().lower()
+    if not old_low:
+        return
+    with TOKEN_CACHE_LOCK:
+        for token, entry in list(TOKEN_CACHE.items()):
+            if entry and str(entry[0] or "").strip().lower() == old_low:
+                TOKEN_CACHE[token] = (new, entry[1], entry[2])
+
+
+def record_user_identity(userid, username: str) -> str:
+    """Notes a VERIFIED (userid, username) pair; migrates data on a rename.
+
+    Called only with pairs the game server itself reported (player/getinfo).
+    Returns the previous username when a rename was detected and migrated,
+    else "". The player-index cache is dropped after a migration so alliance
+    rosters and activity reads see the new name immediately.
+    """
+    try:
+        uid = int(userid)
+    except (TypeError, ValueError):
+        return ""
+    name = str(username or "").strip()
+    if uid <= 0 or not name:
+        return ""
+
+    renamed_from = ""
+    summary = None
+    with STORAGE_LOCK:
+        index = load_users_index()
+        key = str(uid)
+        entry = index.get(key)
+        if not isinstance(entry, dict):
+            index[key] = {
+                "name": name,
+                "previous": [],
+                "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            atomic_write_json(users_index_path(), index)
+            return ""
+        old = str(entry.get("name", "")).strip()
+        if old == name:
+            return ""
+        if old:
+            summary = migrate_username_locked(old, name)
+            renamed_from = old
+        previous = [str(p) for p in entry.get("previous", []) if str(p).strip()]
+        if old and old.lower() != name.lower():
+            previous = [p for p in previous if p.strip().lower() != old.lower()] + [old]
+        entry.update({
+            "name": name,
+            "previous": previous[-10:],
+            "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        index[key] = entry
+        atomic_write_json(users_index_path(), index)
+
+    if renamed_from:
+        rename_token_cache(renamed_from, name)
+        with PLAYER_INDEX_LOCK:
+            PLAYER_INDEX.clear()
+        print(f"[rename] {renamed_from} -> {name} (userid {uid}): {summary}")
+        # append_audit takes STORAGE_LOCK itself, so it must run after the
+        # migration block released it (threading.Lock is not re-entrant).
+        append_audit("system", "username-change", f"{renamed_from} -> {name} (userid {uid})")
+    return renamed_from
 
 
 # ---------------------------------------------------------------------------
@@ -1474,6 +2247,482 @@ RATE_DENY_LOG_INTERVAL = 30     # seconds between denial log lines per bucket
 RATE_LIMIT_LOCK = threading.Lock()
 RATE_BUCKETS: dict = {}  # key -> [tokens, last_refill_mono, last_deny_log_mono]
 
+# ----------------------------------------------------------------------
+# Honeypot bans
+# ----------------------------------------------------------------------
+# Paths no legitimate client ever requests. This viewer is a single-page app
+# plus /api/* and /setup/*; it has never had PHP, WordPress, a git checkout in
+# the web root, or an .env file. A request for any of these is a scanner
+# fingerprinting the host, so it is safe to treat one hit as proof of intent -
+# no threshold, no scoring, no chance of catching a real visitor mid-session.
+#
+# Matching is on the decoded path, lower-cased, prefix or exact. Keep this
+# list to things that are IMPOSSIBLE here rather than merely unused: a path
+# that might one day become real (say /admin) belongs in a rate limit, not a
+# ban list.
+HONEYPOT_PREFIXES = (
+    "/wp-",              # wp-admin, wp-login.php, wp-includes, wp-content, wp-json
+    "/wordpress/",
+    "/xmlrpc.php",
+    "/vendor/phpunit/",  # CVE-2017-9841 eval-stdin RCE probe
+    "/.git",             # /.git/config, /.git/HEAD, ...
+    "/.svn",
+    "/.hg",
+    "/.bzr",
+    "/.env",             # and .env.local, .env.prod, .env~, ...
+    "/.aws/",
+    "/.ssh/",
+    "/.htaccess",
+    "/.htpasswd",
+    "/.npmrc",
+    "/.dockerignore",
+    "/phpmyadmin",
+    "/phpinfo",
+    "/cgi-bin/",
+    "/rsc/",             # random-filename POST probes seen in the wild
+)
+HONEYPOT_EXACT = (
+    "/.ds_store",
+    "/config.php",
+    "/shell.php",
+    "/eval-stdin.php",
+)
+
+# Never bannable, whatever they do. Loopback is first and load-bearing: the
+# cloudflared tunnel connects over it, so banning 127.0.0.1 would take the
+# whole site off the internet. Everything reaching this server arrives from
+# loopback, so this list is what stops a self-inflicted outage.
+BAN_NEVER = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
+
+BAN_LOCK = threading.Lock()
+# ip -> {"until": epoch, "strikes": int, "reason": str, "at": epoch,
+#        "path": str, "count": int}
+BANS: dict = {}
+BAN_MAX_TRACKED = 4096
+BAN_HISTORY_MAX = 500
+BAN_HISTORY: list = []   # newest last; what the UI reads
+
+
+def is_honeypot_path(path: str) -> bool:
+    """True if path is one only a scanner would ask for."""
+    probe = unquote(path.split("?", 1)[0]).lower()
+    if not probe.startswith("/"):
+        probe = "/" + probe
+    if probe in HONEYPOT_EXACT:
+        return True
+    if any(probe.startswith(prefix) for prefix in HONEYPOT_PREFIXES):
+        return True
+    # Console-added patterns (item 11). Checked after the built-ins so the
+    # compiled list always wins and a bad custom entry cannot mask it.
+    if any(probe.startswith(prefix) for prefix in HONEYPOT_CUSTOM):
+        return True
+    # A honeypot name at any depth: /blog/wp-includes/..., /site/.env, the
+    # exact shape of the scans in the wild, which walk a list of prefixes.
+    return any(f"/{segment}" in probe
+               for segment in ("wp-admin", "wp-includes", "wp-login",
+                               "wp-content", "wp-json", "xmlrpc.php",
+                               ".git/", ".env", "phpunit/", "eval-stdin.php"))
+
+
+def ban_remaining(ip: str) -> int:
+    """Seconds left on ip's ban, or 0 if it may proceed. Never bans the
+    tunnel itself."""
+    if ip in BAN_NEVER:
+        return 0
+    now = time.time()
+    with BAN_LOCK:
+        record = BANS.get(ip)
+        if not record:
+            return 0
+        left = int(record.get("until", 0) - now)
+        return left if left > 0 else 0
+
+
+def ban_record_hit(ip: str, path: str, method: str) -> int:
+    """Registers a honeypot hit. Returns the ban length in seconds, or 0 when
+    bans are disabled (dry run) or the IP is unbannable.
+
+    Terms double per strike: 60m, 120m, 240m ... capped at banMaxMinutes. A
+    strike is forgotten banStrikeDecayHours after the last one, so an address
+    that was reassigned to somebody else eventually starts clean.
+    """
+    if ip in BAN_NEVER:
+        return 0
+    enabled = get_setting("honeypotBansEnabled") == 1
+    first = get_setting("banFirstMinutes") * 60
+    ceiling = get_setting("banMaxMinutes") * 60
+    decay = get_setting("banStrikeDecayHours") * 3600
+    now = time.time()
+    with BAN_LOCK:
+        record = BANS.get(ip)
+        if record and now - record.get("at", 0) > decay:
+            record = None            # strikes lapsed; treat as a first offence
+        strikes = (record.get("strikes", 0) if record else 0) + 1
+        seen = (record.get("count", 0) if record else 0) + 1
+        term = min(ceiling, first * (2 ** (strikes - 1)))
+        entry = {
+            "until": (now + term) if enabled else 0,
+            "strikes": strikes,
+            "count": seen,
+            "at": now,
+            "path": path[:120],
+            "method": method,
+            "reason": "honeypot",
+            "enforced": enabled,
+        }
+        BANS[ip] = entry
+        BAN_HISTORY.append({"ip": ip, **entry})
+        del BAN_HISTORY[:-BAN_HISTORY_MAX]
+        if len(BANS) > BAN_MAX_TRACKED:
+            for stale in sorted(BANS, key=lambda k: BANS[k].get("at", 0))[:len(BANS) // 4]:
+                BANS.pop(stale, None)
+    ops_persist_bans()
+    return term if enabled else 0
+
+
+def ban_list() -> list:
+    """Active and lapsed ban records, newest first - the UI's table."""
+    now = time.time()
+    with BAN_LOCK:
+        rows = [{"ip": ip, **record} for ip, record in BANS.items()]
+    for row in rows:
+        row["remaining"] = max(0, int(row.get("until", 0) - now))
+        row["active"] = row["remaining"] > 0
+    rows.sort(key=lambda r: r.get("at", 0), reverse=True)
+    return rows
+
+
+def ban_clear(ip: str) -> bool:
+    with BAN_LOCK:
+        removed = BANS.pop(ip, None) is not None
+    if removed:
+        ops_persist_bans()
+    return removed
+
+
+def ban_add_manual(ip: str, minutes: int, reason: str = "manual") -> bool:
+    """Operator ban from the UI. Refuses the tunnel and anything unparseable
+    so a mistyped entry cannot lock everyone out."""
+    ip = str(ip).strip()
+    if not ip or ip in BAN_NEVER or len(ip) > 64:
+        return False
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if ipaddress.ip_address(ip).is_loopback:
+        return False
+    minutes = max(1, min(get_setting("banMaxMinutes"), int(minutes)))
+    now = time.time()
+    with BAN_LOCK:
+        BANS[ip] = {"until": now + minutes * 60, "strikes": 1, "count": 0,
+                    "at": now, "path": "", "method": "", "reason": reason[:60],
+                    "enforced": True}
+    ops_persist_bans()
+    return True
+
+
+# ----------------------------------------------------------------------
+# Ops store: the console's data, on disk
+# ----------------------------------------------------------------------
+# Every request is recorded here so the operator console can show what the
+# terminal used to. Two requirements shaped this:
+#
+#   1. Recording must not slow the request. Requests land in an in-memory
+#      deque and a background thread batches them into SQLite, so the hot
+#      path costs one append and never touches the disk or waits on a lock
+#      held by a writer.
+#   2. It must survive a restart. Bans especially - an in-memory ban list
+#      means a reboot unbans every scanner, and a scanner that comes back
+#      every 13 minutes will outlast any uptime.
+#
+# sqlite3 is in the standard library, so this adds no dependency.
+OPS_DB_LOCK = threading.Lock()
+OPS_BUFFER_LOCK = threading.Lock()
+OPS_BUFFER: "deque" = deque(maxlen=20000)
+OPS_DB: "sqlite3.Connection | None" = None
+OPS_SEQ = itertools.count(1)
+OPS_FLUSH_SECONDS = 1.0
+OPS_DROPPED = [0]        # requests lost to a full buffer, surfaced in /stats
+# When true, honeypot 403/404s are recorded to the console but NOT printed
+# to stdout - the console is the place to read them now. Togglable live
+# from the UI so a suspicious moment can be watched in the journal too.
+OPS_CONSOLE_QUIET = [True]
+
+
+def ops_db_path() -> Path:
+    return admin_dir() / "ops.db"
+
+
+def ops_db() -> "sqlite3.Connection":
+    """The shared connection. WAL so the writer thread and reader requests do
+    not block each other; check_same_thread off because ThreadingHTTPServer
+    serves each request on its own thread and OPS_DB_LOCK serialises us."""
+    global OPS_DB
+    if OPS_DB is None:
+        admin_dir().mkdir(parents=True, exist_ok=True)
+        OPS_DB = sqlite3.connect(str(ops_db_path()), check_same_thread=False,
+                                 timeout=5.0)
+        OPS_DB.execute("PRAGMA journal_mode=WAL")
+        OPS_DB.execute("PRAGMA synchronous=NORMAL")
+        OPS_DB.executescript("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                at       REAL    NOT NULL,
+                ip       TEXT    NOT NULL,
+                method   TEXT    NOT NULL,
+                path     TEXT    NOT NULL,
+                status   INTEGER NOT NULL,
+                ms       REAL    NOT NULL,
+                bytes    INTEGER NOT NULL DEFAULT 0,
+                agent    TEXT    NOT NULL DEFAULT '',
+                priority INTEGER NOT NULL DEFAULT 0,
+                tunnel   INTEGER NOT NULL DEFAULT 0,
+                kind     TEXT    NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS requests_at  ON requests(at);
+            CREATE INDEX IF NOT EXISTS requests_ip  ON requests(ip);
+            CREATE TABLE IF NOT EXISTS bans (
+                ip       TEXT PRIMARY KEY,
+                until    REAL NOT NULL,
+                strikes  INTEGER NOT NULL DEFAULT 1,
+                count    INTEGER NOT NULL DEFAULT 0,
+                at       REAL NOT NULL,
+                path     TEXT NOT NULL DEFAULT '',
+                method   TEXT NOT NULL DEFAULT '',
+                reason   TEXT NOT NULL DEFAULT '',
+                enforced INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS never_ban (
+                ip    TEXT PRIMARY KEY,
+                at    REAL NOT NULL,
+                note  TEXT NOT NULL DEFAULT ''
+            );
+        """)
+        OPS_DB.commit()
+    return OPS_DB
+
+
+# "kind" classifies a request once, at record time, so the console can filter
+# on it without re-deriving intent from the path on every read.
+#   honeypot - a scanner path (see is_honeypot_path)
+#   banned   - refused because the IP is banned
+#   untunnel - loopback with no CF-Connecting-IP: not tunnel traffic
+#   api / asset / page - ordinary traffic
+def ops_classify(path: str, status: int, tunnel: bool) -> str:
+    if is_honeypot_path(path):
+        return "honeypot"
+    if not tunnel:
+        return "untunnel"
+    if status == 403:
+        return "banned"
+    bare = path.split("?", 1)[0]
+    if bare.startswith("/api/"):
+        return "api"
+    if bare.startswith(("/assets/", "/data/", "/setup/")) or "." in bare.rsplit("/", 1)[-1]:
+        return "asset"
+    return "page"
+
+
+def ops_record(ip: str, method: str, path: str, status: int, ms: float,
+               size: int, agent: str, priority: int, tunnel: bool) -> None:
+    """Hot path. Append only - never touches SQLite."""
+    row = (time.time(), ip[:64], method[:8], path[:400], int(status),
+           round(float(ms), 2), int(size or 0), agent[:200], int(priority or 0),
+           1 if tunnel else 0, ops_classify(path, status, tunnel))
+    with OPS_BUFFER_LOCK:
+        if len(OPS_BUFFER) == OPS_BUFFER.maxlen:
+            OPS_DROPPED[0] += 1
+        OPS_BUFFER.append(row)
+
+
+def ops_flush() -> int:
+    with OPS_BUFFER_LOCK:
+        if not OPS_BUFFER:
+            return 0
+        batch = list(OPS_BUFFER)
+        OPS_BUFFER.clear()
+    with OPS_DB_LOCK:
+        db = ops_db()
+        db.executemany(
+            "INSERT INTO requests (at,ip,method,path,status,ms,bytes,agent,"
+            "priority,tunnel,kind) VALUES (?,?,?,?,?,?,?,?,?,?,?)", batch)
+        db.commit()
+    return len(batch)
+
+
+def ops_prune() -> None:
+    """Drops rows past the retention window. Cheap enough to run each flush
+    cycle, and keeps the file bounded without a separate maintenance job."""
+    cutoff = time.time() - get_setting("opsLogRetentionHours") * 3600
+    with OPS_DB_LOCK:
+        db = ops_db()
+        db.execute("DELETE FROM requests WHERE at < ?", (cutoff,))
+        db.execute("DELETE FROM bans WHERE until < ? AND at < ?",
+                   (time.time(), cutoff))
+        db.commit()
+
+
+def ops_persist_bans() -> None:
+    """Mirrors the in-memory ban table to disk. Called after every change, so
+    a restart does not amnesty every scanner currently serving a term."""
+    with BAN_LOCK:
+        rows = [(ip, r.get("until", 0), r.get("strikes", 1), r.get("count", 0),
+                 r.get("at", 0), r.get("path", ""), r.get("method", ""),
+                 r.get("reason", ""), 1 if r.get("enforced") else 0)
+                for ip, r in BANS.items()]
+    try:
+        with OPS_DB_LOCK:
+            db = ops_db()
+            db.execute("DELETE FROM bans")
+            db.executemany("INSERT INTO bans (ip,until,strikes,count,at,path,"
+                           "method,reason,enforced) VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            db.commit()
+    except Exception as error:      # never let bookkeeping break a request
+        print(f"[ops] ban persist failed: {error}")
+
+
+def ops_load_bans() -> int:
+    """Restores bans and the operator never-ban list at startup."""
+    try:
+        with OPS_DB_LOCK:
+            db = ops_db()
+            rows = db.execute("SELECT ip,until,strikes,count,at,path,method,"
+                              "reason,enforced FROM bans").fetchall()
+            extra = db.execute("SELECT ip FROM never_ban").fetchall()
+    except Exception as error:
+        print(f"[ops] ban load failed: {error}")
+        return 0
+    now = time.time()
+    with BAN_LOCK:
+        for ip, until, strikes, count, at, path, method, reason, enforced in rows:
+            BANS[ip] = {"until": until, "strikes": strikes, "count": count,
+                        "at": at, "path": path, "method": method,
+                        "reason": reason, "enforced": bool(enforced)}
+    for (ip,) in extra:
+        BAN_NEVER.add(str(ip))
+    return sum(1 for r in rows if r[1] > now)
+
+
+def ops_never_ban_add(ip: str, note: str = "") -> bool:
+    ip = str(ip).strip()
+    if not ip or len(ip) > 64:
+        return False
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    BAN_NEVER.add(ip)
+    ban_clear(ip)
+    with OPS_DB_LOCK:
+        db = ops_db()
+        db.execute("INSERT OR REPLACE INTO never_ban (ip,at,note) VALUES (?,?,?)",
+                   (ip, time.time(), note[:120]))
+        db.commit()
+    ops_persist_bans()
+    return True
+
+
+def ops_never_ban_remove(ip: str) -> bool:
+    """Loopback can never be removed from the allowlist - see BAN_NEVER."""
+    ip = str(ip).strip()
+    if ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"):
+        return False
+    BAN_NEVER.discard(ip)
+    with OPS_DB_LOCK:
+        db = ops_db()
+        db.execute("DELETE FROM never_ban WHERE ip = ?", (ip,))
+        db.commit()
+    return True
+
+
+# ----------------------------------------------------------------------
+# Custom honeypot patterns (console-editable, item 11)
+# ----------------------------------------------------------------------
+# The compiled-in HONEYPOT_PREFIXES are the ones that are certain. This file
+# holds additions made from the console, so a new scanner pattern can be
+# blocked without editing source and restarting. Removals are only ever of
+# custom entries: the built-in list cannot be edited away from a web UI,
+# because a mistake there would stop banning real scanners silently.
+HONEYPOT_CUSTOM: set = set()
+
+
+def honeypot_custom_path() -> Path:
+    return admin_dir() / "honeypots.json"
+
+
+def load_honeypot_custom() -> set:
+    data = read_json(honeypot_custom_path(), {"prefixes": []})
+    items = data.get("prefixes") if isinstance(data, dict) else None
+    out = set()
+    for entry in (items or []):
+        text = str(entry).strip().lower()
+        if text.startswith("/") and 1 < len(text) <= 120:
+            out.add(text)
+    return out
+
+
+def save_honeypot_custom() -> None:
+    with STORAGE_LOCK:
+        atomic_write_json(honeypot_custom_path(),
+                          {"prefixes": sorted(HONEYPOT_CUSTOM)})
+
+
+def honeypot_custom_add(pattern: str) -> tuple:
+    """Returns (ok, message). Refuses anything that would match ordinary
+    traffic, which is the one way this feature could take the site down."""
+    text = str(pattern).strip().lower()
+    if not text.startswith("/"):
+        return (False, "Must start with /")
+    if len(text) < 2 or len(text) > 120:
+        return (False, "Between 2 and 120 characters")
+    # A pattern this short or this generic would match real requests. Checked
+    # against the paths the viewer actually serves rather than a guess.
+    reserved = ("/api", "/assets", "/data", "/setup", "/app", "/index",
+                "/styles", "/js", "/favicon", "/health", "/log", "/storage")
+    if any(text.startswith(r) or r.startswith(text) for r in reserved):
+        return (False, f"Refused: {text} overlaps paths this viewer serves")
+    if text in HONEYPOT_CUSTOM:
+        return (False, "Already listed")
+    HONEYPOT_CUSTOM.add(text)
+    save_honeypot_custom()
+    return (True, f"Added {text}")
+
+
+def honeypot_custom_remove(pattern: str) -> bool:
+    text = str(pattern).strip().lower()
+    if text not in HONEYPOT_CUSTOM:
+        return False
+    HONEYPOT_CUSTOM.discard(text)
+    save_honeypot_custom()
+    return True
+
+
+def _ops_writer_loop() -> None:
+    prune_at = 0.0
+    while True:
+        time.sleep(OPS_FLUSH_SECONDS)
+        try:
+            ops_flush()
+            now = time.monotonic()
+            if now - prune_at > 300:
+                prune_at = now
+                ops_prune()
+        except Exception as error:
+            print(f"[ops] writer error: {error}")
+
+
+def start_ops_writer() -> None:
+    HONEYPOT_CUSTOM.update(load_honeypot_custom())
+    if HONEYPOT_CUSTOM:
+        print(f"[ops] {len(HONEYPOT_CUSTOM)} custom honeypot pattern(s) loaded")
+    restored = ops_load_bans()
+    threading.Thread(target=_ops_writer_loop, daemon=True,
+                     name="ops-writer").start()
+    if restored:
+        print(f"[ops] restored {restored} active ban(s) from {ops_db_path().name}")
+
+
 
 # ---------------------------------------------------------------------------
 # Image cache (/imagecache/<asset path>). Serves game asset images (building
@@ -1544,6 +2793,15 @@ def asset_base_urls() -> list:
 
 
 def fetch_upstream_asset(parts: list):
+    # Bundled assets are authoritative when present: the live CDN 404s
+    # these (korath_5/6 et al.), so don't even ask it first.
+    _bundled_root = Path(__file__).resolve().parent / "app" / "static" / "assets" / "cdnfallback"
+    _bundled = _bundled_root.joinpath(*parts)
+    try:
+        if _bundled.is_file() and str(_bundled.resolve()).startswith(str(_bundled_root.resolve())):
+            return _bundled.read_bytes()
+    except OSError:
+        pass
     """Fetches one asset from the game's CDN (falling back to the API host).
     Returns bytes or None. Never called for a path already on disk."""
     joined = "/".join(parts)
@@ -1570,6 +2828,17 @@ def fetch_upstream_asset(parts: list):
                 print(f"[imagecache] fetch failed: {url} ({error!r})")
         if payload is not None:
             break
+    if payload is None:
+        # Bundled fallback: assets the live CDN is known to 404 on
+        # (observed: monsters/korath_5.png and korath_6.png - Korath's top
+        # two evolution sheets) ship under assets/cdnfallback/.
+        bundled = Path(__file__).resolve().parent / "app" / "static" / "assets" / "cdnfallback"
+        candidate = bundled.joinpath(*parts)
+        try:
+            if candidate.is_file() and str(candidate.resolve()).startswith(str(bundled.resolve())):
+                payload = candidate.read_bytes()
+        except OSError:
+            payload = None
     if payload is None:
         with ASSET_MISSES_LOCK:
             ASSET_MISSES[joined] = now
@@ -1629,43 +2898,85 @@ def full_map_gate_release() -> None:
         pass  # gate was resized under us; the old one is being discarded
 
 
-def anonymize_hidden_cells(cells: list, hidden: set) -> list:
-    """Disguises cells owned by hidden players.
+# MR2 wild monster generation, mirroring app/static/js/shared.js exactly.
+# Tribe and level are pure functions of (x + y): wildMonsterCell.ts does
+# Tribes[(x + y) % 4] and calculateTribeLevel.ts does
+# ((x + y) % (45 - minimum)) + minimum. Array order is the tribe index, so this
+# list must stay in the server's order. Kozu's declared 29 is unreachable -
+# (x+y) % 4 == 1 forces (x+y) % 16 into {1,5,9,13} - and that quirk is
+# reproduced rather than corrected.
+MR2_TRIBE_ORDER = ("legionnaire", "kozu", "abunakki", "dreadnaut")
+MR2_TRIBE_MIN_LEVEL = {
+    "legionnaire": 25,
+    "kozu": 29,
+    "abunakki": 25,
+    "dreadnaut": 25,
+}
+MR2_TRIBE_MAX_LEVEL = 45
 
-    Two tells must go: the ownership fields, AND the tile's true height - base
-    tiles sit on elevated ground, so keeping the real height painted a lone
-    grey "mountain" hex that marked the spot just as loudly as the old
-    missing-cell hole did. The anonymized tile instead takes the average
-    height of the zone's plain terrain, blending into its surroundings.
+
+def generated_wild_cell(x: int, y: int, terrain_height: int) -> dict:
+    """The wild monster cell that (x, y) generates."""
+    total = int(x) + int(y)
+    tribe = MR2_TRIBE_ORDER[total % len(MR2_TRIBE_ORDER)]
+    lower = MR2_TRIBE_MIN_LEVEL[tribe]
+    level = (total % (MR2_TRIBE_MAX_LEVEL - lower)) + lower
+    return {
+        "x": int(x),
+        "y": int(y),
+        "b": 1,  # MapRoomCell.WM
+        "uid": 0,
+        "i": int(terrain_height),
+        "n": tribe,
+        "l": level,
+        "dm": 0,
+        "d": 0,
+    }
+
+
+def anonymize_hidden_cells(cells: list, hidden: set) -> list:
+    """Replaces cells owned by hidden players with the wild monster cell that
+    coordinate would have generated.
+
+    The previous version blanked the cell to {x, y, i: <zone average>}. That
+    removed the owner but left a tell: an empty patch of land, at a height
+    that matched nothing in particular, exactly where a base plainly used to
+    be. It also destroyed the real terrain height on the way through, which is
+    lossy for a cache that other readers share.
+
+    MR2 generation removes the guesswork. Tribe and level are pure functions
+    of (x + y), so the cell can be replaced with precisely the wild monster
+    camp that would exist there if nobody had ever settled it - not an
+    approximation of one.
+
+    The terrain height passes through unchanged. userCell.ts and
+    wildMonsterCell.ts both emit `i: cell.terrainHeight` from the same seeded
+    noise, so an occupied cell's height is already identical to its wild
+    counterpart's; it is a function of world seed and position, not of who
+    lives there. Keeping it is what makes the disguise seamless. (The old
+    comment here assumed bases sit on elevated ground and blended the height
+    to compensate - findFreeCell only rejects water, so that was never true,
+    and the blending was itself the thing that made these tiles stand out.)
     """
     if not isinstance(cells, list) or not hidden:
         return cells
-    if HIDDEN_TILE_STYLE == "water":
-        blend_height = HIDDEN_WATER_HEIGHT
-    else:
-        plain_heights = [
-            int(cell.get("i", 0) or 0)
-            for cell in cells
-            if isinstance(cell, dict)
-            and not int(cell.get("uid", 0) or 0)
-            and cell.get("b") in (None, 0)
-            and int(cell.get("i", 0) or 0) > 0
-        ]
-        blend_height = (
-            round(sum(plain_heights) / len(plain_heights)) if plain_heights else 120
-        )
-    return [
-        (
-            {"x": cell.get("x"), "y": cell.get("y"), "i": blend_height}
-            if (
-                isinstance(cell, dict)
-                and int(cell.get("uid", 0) or 0) > 0
-                and str(cell.get("n", "")).strip().lower() in hidden
-            )
-            else cell
-        )
-        for cell in cells
-    ]
+    out = []
+    for cell in cells:
+        if (
+            isinstance(cell, dict)
+            and int(cell.get("uid", 0) or 0) > 0
+            and str(cell.get("n", "")).strip().lower() in hidden
+        ):
+            height = int(cell.get("i", 0) or 0)
+            if HIDDEN_TILE_STYLE == "water":
+                out.append({"x": cell.get("x"), "y": cell.get("y"),
+                            "i": HIDDEN_WATER_HEIGHT})
+            else:
+                out.append(generated_wild_cell(
+                    int(cell.get("x", 0) or 0), int(cell.get("y", 0) or 0), height))
+        else:
+            out.append(cell)
+    return out
 
 
 def rate_limit_take(key: str, per_minute: float, burst: float):
@@ -1721,6 +3032,59 @@ def member_rank(data: dict, name: str) -> str:
 PLAYER_INDEX: dict = {}
 PLAYER_INDEX_LOCK = threading.Lock()
 PLAYER_INDEX_TTL_SECONDS = 600
+
+# Ownership-change index for the Activity tabs: per world, the cells whose
+# cached copy carries a takeover stamp (tt/po/pn/pb, written by the viewer's
+# merge path). Rebuilt at most once per TTL per world; the scan is the same
+# zone-file walk the player index does.
+CHANGES_INDEX: dict = {}
+CHANGES_INDEX_LOCK = threading.Lock()
+CHANGES_INDEX_TTL_SECONDS = 60
+CHANGES_INDEX_MAX_RECORDS = 300
+
+
+def get_changes_index(world: str) -> list:
+    now = time.time()
+    with CHANGES_INDEX_LOCK:
+        cached = CHANGES_INDEX.get(world)
+        if cached and now - cached["builtAt"] < CHANGES_INDEX_TTL_SECONDS:
+            return cached["records"]
+
+    records: list = []
+    zones_dir = STORAGE_ROOT / f"server_{world}" / "zones"
+    if zones_dir.is_dir():
+        for path in zones_dir.glob("zone_*.json"):
+            payload = read_json(path, None)
+            cells = payload.get("cells") if isinstance(payload, dict) else None
+            if not isinstance(cells, list):
+                continue
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    continue
+                try:
+                    takeover_at = int(cell.get("tt", 0) or 0)
+                except (TypeError, ValueError):
+                    takeover_at = 0
+                if takeover_at <= 0:
+                    continue
+                records.append({
+                    "world": world,
+                    "x": int(cell.get("x", 0) or 0),
+                    "y": int(cell.get("y", 0) or 0),
+                    "at": takeover_at,
+                    "prevUid": int(cell.get("po", 0) or 0),
+                    "prevName": str(cell.get("pn", "") or "").strip(),
+                    "prevType": int(cell.get("pb", 0) or 0),
+                    "newUid": int(cell.get("uid", 0) or 0),
+                    "newName": str(cell.get("n", "") or "").strip(),
+                    "newType": int(cell.get("b", 0) or 0),
+                })
+    records.sort(key=lambda record: record["at"], reverse=True)
+    records = records[:CHANGES_INDEX_MAX_RECORDS]
+
+    with CHANGES_INDEX_LOCK:
+        CHANGES_INDEX[world] = {"builtAt": now, "records": records}
+    return records
 
 
 def update_activity_file(world: str, players: dict) -> None:
@@ -1983,6 +3347,62 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         except ConnectionError:
             print(f"[net] client disconnected during {self.command} {self.path}")
 
+    def log_request(self, code="-", size="-") -> None:
+        """Records every request for the operator console, then logs as usual.
+
+        BaseHTTPRequestHandler calls this from send_response with the status,
+        so it is the one place that sees method, path and outcome together.
+        """
+        status = code.value if hasattr(code, "value") else code
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            status = 0
+        try:
+            ops_record(
+                ip=self.client_ip(),
+                method=str(self.command or "-"),
+                path=str(self.path or "-"),
+                status=status,
+                ms=(time.monotonic() - getattr(self, "_req_start", time.monotonic())) * 1000.0,
+                size=0 if size == "-" else size,
+                agent=str(self.headers.get("User-Agent", "") or ""),
+                priority=getattr(self, "_fetch_priority", 0) or 0,
+                tunnel=bool(self.headers.get("CF-Connecting-IP")),
+            )
+        except Exception:
+            pass          # the console is never worth failing a request over
+        if OPS_CONSOLE_QUIET[0] and status in (403, 404) and \
+                is_honeypot_path(str(self.path or "")):
+            return        # scanner noise: it is in the console, not the journal
+        # Verbosity is a setting now that every request is queryable in the
+        # console. Recording already happened above; this only decides whether
+        # a line is also printed.
+        try:
+            verbosity = get_setting("journalRequestLines")
+        except Exception:
+            verbosity = 1
+        if verbosity == 0:
+            return
+        if verbosity == 1 and status < 400 and self.headers.get("CF-Connecting-IP"):
+            return        # ordinary tunnel traffic that succeeded
+        super().log_request(code, size)
+
+    def log_error(self, format: str, *args: object) -> None:
+        """Suppresses the duplicate line that send_error produces.
+
+        Every 404 previously printed TWICE - once here as
+        `code 404, message File not found`, and once from log_request as the
+        request line with its status. The second is strictly more informative,
+        so this one is dropped for the ordinary not-found and forbidden cases
+        and kept for anything genuinely unexpected. That alone halves the
+        volume the journal was carrying.
+        """
+        message = format % args if args else format
+        if "code 404" in message or "code 403" in message:
+            return
+        self.log_message("%s", message)
+
     def log_message(self, format: str, *args: object) -> None:
         # Line shape: <ip> - <UTC timestamp> - <priority> - "<request>" <status> -
         #
@@ -2010,6 +3430,8 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
     # Storage API routing
     # ------------------------------------------------------------------
     def do_GET(self) -> None:
+        if not self.security_gate():
+            return
         if self.route_storage("GET"):
             return
         # The admin console fragment is never served as a static file; it is
@@ -2020,32 +3442,140 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         # check would let /setup/%63onsole.html (and %2E, trailing %2F, ...)
         # slip through and serve the admin markup as a static file.
         normalized = unquote(self.path.split("?", 1)[0]).rstrip("/")
-        if normalized.endswith("/setup/console.html") or normalized.endswith("/setup/console"):
+        if (normalized.endswith("/setup/console.html")
+                or normalized.endswith("/setup/console")
+                or normalized.endswith("/setup/ops.html")
+                or normalized.endswith("/setup/ops")):
             self.send_json(404, {"error": "Not found"})
             return
         super().do_GET()
 
     def do_POST(self) -> None:
+        if not self.security_gate():
+            return
         if self.route_storage("POST"):
             return
         self.send_json(405, {"error": "Method not allowed"})
 
     def do_PUT(self) -> None:
+        if not self.security_gate():
+            return
         if self.route_storage("PUT"):
             return
         self.send_json(405, {"error": "Method not allowed"})
 
     def client_ip(self) -> str:
-        """Real client address. Behind Caddy the socket peer is loopback and
-        the client is in X-Forwarded-For (trustworthy: stock Caddy overwrites
-        inbound XFF from untrusted sources). Direct connections use the
-        socket address; their own XFF header is ignored."""
+        """Real client address, from the one header the tunnel controls.
+
+        Everything arrives through cloudflared, so the socket peer is always
+        loopback and the client address has to come from a header. Which
+        header matters enormously, because this value keys the rate limiter
+        and the ban list:
+
+        Cloudflare APPENDS to X-Forwarded-For, it does not replace it. A
+        client that sends `X-Forwarded-For: 1.2.3.4` gets `1.2.3.4,
+        <real client IP>` delivered here - everything the client wrote is
+        passed through untouched and the true address is added on the RIGHT.
+        Reading the LEFTMOST entry, as this function used to, therefore read
+        an attacker-supplied string: rotate it per request to escape the rate
+        limiter entirely, or set it to somebody else's address to get them
+        banned instead. "Danger on the left, trust on the right."
+
+        CF-Connecting-IP is a single value that Cloudflare sets on every
+        request crossing its edge and does not pass through from the client,
+        so it is the trustworthy one here. It is only trustworthy because the
+        peer is loopback and the only thing on loopback is our tunnel - if
+        this server is ever exposed directly, an attacker sets this header to
+        whatever it likes and we are back to square one. Hence HOST defaults
+        to 127.0.0.1 and require_tunnel() rejects anything without the header.
+
+        Duplicate headers are read defensively: get_all returns every
+        instance, and we take the LAST, since a client-injected copy would be
+        seen before Cloudflare's.
+        """
         peer = str(self.client_address[0])
-        if peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            forwarded = str(self.headers.get("X-Forwarded-For", "")).split(",")[0].strip()
-            if forwarded:
-                return forwarded[:64]
+        if peer not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            # Direct connection: no header is trustworthy, use the socket.
+            return peer
+        values = self.headers.get_all("CF-Connecting-IP") or []
+        for candidate in reversed(values):
+            candidate = str(candidate).strip()
+            if not candidate or len(candidate) > 64:
+                continue
+            try:
+                ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            return candidate
         return peer
+
+    def require_tunnel(self) -> bool:
+        """Rejects requests that did not come through the cloudflared tunnel.
+
+        Returns True if the request may proceed.
+
+        A request whose peer is loopback but which carries no CF-Connecting-IP
+        did not cross Cloudflare's edge - it was made on this host, or by
+        something else reaching the port locally. Those are exactly the lines
+        that showed up as `127.0.0.1` in the access log: a local scanner, not
+        tunnel traffic. Since every real visitor arrives through the tunnel,
+        anything without the header is refused rather than served and logged
+        as an unattributable request.
+
+        Loopback with no header is still allowed for a small set of local
+        health probes, so `curl localhost/api/health` from a shell or a
+        systemd/docker healthcheck keeps working.
+        """
+        peer = str(self.client_address[0])
+        if peer not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            # Reached the port directly: HOST should have prevented this.
+            self.send_json(403, {"error": "Direct access not permitted"})
+            print(f"[tunnel] 403 direct connection from {peer} on "
+                  f"{self.command} {self.path[:120]} - is HOST bound to 0.0.0.0?")
+            return False
+        if self.headers.get("CF-Connecting-IP"):
+            return True
+        path = unquote(self.path.split("?", 1)[0]).rstrip("/")
+        # Only the explicit health endpoints. NOT "" - the root path strips to
+        # the empty string, and letting that through would have exempted the
+        # whole app from the tunnel requirement, which is the one thing this
+        # function exists to enforce.
+        if path in ("/api/health", "/health"):
+            return True
+        self.send_json(403, {"error": "Requests must arrive through the tunnel"})
+        print(f"[tunnel] 403 no CF-Connecting-IP on {self.command} {self.path[:120]} "
+              f"(local request, not tunnel traffic)")
+        return False
+
+    def security_gate(self) -> bool:
+        """Tunnel check, then ban check, then honeypot check. Returns True if
+        the request may proceed to normal routing.
+
+        Runs before any other work on every request: a banned scanner should
+        cost a dict lookup, not a file read or an upstream call.
+        """
+        self._req_start = time.monotonic()
+        if not self.require_tunnel():
+            return False
+        ip = self.client_ip()
+        remaining = ban_remaining(ip)
+        if remaining > 0:
+            # 403 rather than 429: this is not "slow down", it is "go away",
+            # and no Retry-After invites a retry schedule.
+            self.send_json(403, {"error": "Forbidden"})
+            return False
+        path = self.path.split("?", 1)[0]
+        if is_honeypot_path(path):
+            term = ban_record_hit(ip, path, self.command)
+            if term:
+                print(f"[honeypot] banned {ip} for {term // 60}m - "
+                      f"{self.command} {path[:120]}")
+            else:
+                print(f"[honeypot] would ban {ip} (bans disabled) - "
+                      f"{self.command} {path[:120]}")
+            self.send_json(404, {"error": "Not found"})
+            return False
+        return True
 
     def cached_session_name(self) -> str:
         """Signed-in username from the token cache ONLY - never a network call.
@@ -2142,6 +3672,130 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         if path == "/log":
             self.handle_log(method)
             return True
+        if path == "/api/basedata":
+            if method != "GET":
+                self.send_json(405, {"error": "GET only"})
+                return True
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            uid = re.sub(r"[^0-9]", "", str((query.get("uid") or [""])[0]))
+            if not uid:
+                self.send_json(400, {"error": "uid parameter required"})
+                return True
+            path_file = STORAGE_ROOT / "baseloads" / f"{uid}.json"
+            if not path_file.is_file():
+                self.send_json(200, {"found": False})
+                return True
+            data = read_json(path_file, None)
+            if not isinstance(data, dict):
+                self.send_json(200, {"found": False})
+                return True
+            # Attacks are one record per hit; the same attacker recurs.
+            # Group by name: total the counts, keep the most recent time
+            # and the avatar, newest attacker first.
+            grouped: dict = {}
+            for entry in (data.get("attacks") or []):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name", "") or "").strip()
+                if not name:
+                    continue
+                when = int(entry.get("starttime", 0) or 0)
+                g = grouped.get(name)
+                if g is None:
+                    grouped[name] = {
+                        "name": name,
+                        "starttime": when,
+                        "count": int(entry.get("count", 1) or 1),
+                        "pic": str(entry.get("pic_square", "") or ""),
+                    }
+                else:
+                    g["count"] += int(entry.get("count", 1) or 1)
+                    if when > g["starttime"]:
+                        g["starttime"] = when
+            attacks = sorted(grouped.values(),
+                             key=lambda a: a["starttime"], reverse=True)[:20]
+            self.send_json(200, {
+                "found": True,
+                "capturedAt": int(path_file.stat().st_mtime * 1000),
+                "name": str(data.get("name", "") or ""),
+                "createtime": int(data.get("createtime", 0) or 0),
+                "savetime": int(data.get("savetime", 0) or 0),
+                "attacks": attacks,
+                # The game's own battle-log HTML; capped defensively.
+                "attackreport": str(data.get("attackreport", "") or "")[:20000],
+            })
+            return True
+        if path == "/api/baseload-freshness":
+            if method != "GET":
+                self.send_json(405, {"error": "GET only"})
+                return True
+            uids = {}
+            try:
+                base_dir = STORAGE_ROOT / "baseloads"
+                if base_dir.is_dir():
+                    for entry in base_dir.glob("*.json"):
+                        if entry.stem.isdigit():
+                            uids[entry.stem] = int(entry.stat().st_mtime * 1000)
+            except OSError:
+                pass
+            self.send_json(200, {"uids": uids})
+            return True
+        if path == "/api/leaderboard-history":
+            if method != "GET":
+                self.send_json(405, {"error": "GET only"})
+                return True
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            world = str((query.get("world") or [""])[0]).strip()
+            if not world or "/" in world or "\\" in world or ".." in world:
+                self.send_json(400, {"error": "world parameter required"})
+                return True
+            try:
+                self.send_json(200, leaderboard_history(world))
+            except Exception as error:
+                self.send_json(500, {"error": f"history unavailable: {error}"})
+            return True
+        if path == "/api/storage/changes":
+            # Recent ownership changes (captures/losses) from the shared map
+            # cache, for the Activity tabs. Public like the map itself, with
+            # the same moderation-hiding rules; ?server=NAME scopes to one
+            # world, otherwise every cached world contributes ("Global").
+            if method != "GET":
+                self.send_json(405, {"error": "Method not allowed"})
+                return True
+            params = {}
+            if "?" in self.path:
+                params = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            wanted = sanitize_name(params.get("server", [""])[0] or "")
+            try:
+                limit = int(params.get("limit", ["100"])[0])
+            except (TypeError, ValueError):
+                limit = 100
+            limit = max(1, min(200, limit))
+
+            worlds = []
+            if wanted:
+                worlds = [wanted]
+            else:
+                for entry in sorted(STORAGE_ROOT.glob("server_*")):
+                    if (entry / "zones").is_dir():
+                        worlds.append(entry.name[len("server_"):])
+
+            if self.requester_is_admin():
+                hidden = set()
+            else:
+                hidden = hidden_name_set()
+            records = []
+            for world in worlds:
+                for record in get_changes_index(world):
+                    if hidden and (
+                        record["newName"].lower() in hidden
+                        or record["prevName"].lower() in hidden
+                    ):
+                        continue
+                    records.append(record)
+            records.sort(key=lambda record: record["at"], reverse=True)
+            self.send_json(200, {"changes": records[:limit]})
+            return True
         if path == "/api/storage/servers":
             # Public list of worlds with cached map data, so a signed-out
             # visitor can pick one to view. Names are world ids only - no
@@ -2169,9 +3823,15 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 self.send_json(405, {"error": "Method not allowed"})
                 return True
             world = path.split("/")[4]
+            # activity.json is written as a side effect of the player-index
+            # rebuild, which otherwise only runs when alliance endpoints are
+            # used. Rebuild it here (TTL-cached, at most once per 10 min) so
+            # the inactivity filter reads current data instead of whatever an
+            # unrelated feature last left on disk - or nothing at all.
+            if (STORAGE_ROOT / f"server_{world}" / "zones").is_dir():
+                get_player_index(world)
             data = read_json(STORAGE_ROOT / f"server_{world}" / "activity.json", {})
-            hidden = {str(e.get("name", "")).strip().lower()
-                      for e in load_hidden_players() if isinstance(e, dict)}
+            hidden = hidden_name_set()
             players = {}
             if isinstance(data, dict):
                 for low, entry in data.items():
@@ -2334,7 +3994,7 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
             # per-user endpoints).
             username, current_token = self.requester_identity()
             if not username:
-                self.send_json(401, {"error": "Sign in required"})
+                self.send_json(401, self.unauthenticated_payload())
                 return
             # First write for a world: only create the directory if the game
             # server currently lists that world uuid. Fails closed while the
@@ -2551,8 +4211,8 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
     # API-call log for reproducing errors: logs/api-calls-YYYY-MM-DD.log
     # (UTC-dated, pruned after LOG_RETENTION_DAYS), one JSON object per
     # line (ts, method, path, status, ms, request body, response body).
-    # Passwords are redacted; tokens are kept because reproducing a call
-    # usually needs them - delete the file after debugging if that matters.
+    # Passwords and session tokens are redacted (see api_log_redact); set
+    # BYM_API_LOG_TOKENS=1 to keep tokens when reproducing a call needs them.
     # ------------------------------------------------------------------
     def log_api_call(self, method, target, request_body, status, response_payload, elapsed_ms):
         category = api_log_category(target)
@@ -2562,7 +4222,7 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
             req_text = ""
             if isinstance(request_body, (bytes, bytearray)):
                 req_text = request_body.decode("utf-8", "replace")
-            req_text = API_LOG_PASSWORD_RE.sub(r"\1<redacted>", req_text)
+            req_text = api_log_redact(req_text)
             req_text, req_full_len = api_log_cap(req_text)
 
             resp_text = ""
@@ -2570,6 +4230,10 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 resp_text = response_payload.decode("utf-8", "replace")
             elif response_payload is not None:
                 resp_text = str(response_payload)
+            # The response matters as much as the request here: player/getinfo
+            # MINTS a fresh token and echoes it, so the reply carries a live
+            # credential even when the request did not.
+            resp_text = api_log_redact(resp_text)
             resp_text, resp_full_len = api_log_cap(resp_text)
 
             entry = {
@@ -2628,7 +4292,9 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         # themselves); anonymous calls limit per-IP.
         auth_header = self.headers.get("Authorization", "")
         bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
-        user_key = f"ip:{self.client_address[0]}"
+        # client_ip(), NOT client_address[0]: the socket peer is always the
+        # tunnel, so keying on it put every anonymous caller in one bucket.
+        user_key = f"ip:{self.client_ip()}"
         if bearer:
             with TOKEN_CACHE_LOCK:
                 cached = TOKEN_CACHE.get(bearer)
@@ -2782,6 +4448,15 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         self.log_api_call(method, log_target, body, status, payload, elapsed_ms)
         metric_upstream(elapsed_ms, 200 <= int(status) < 400)
 
+        # Every successful base/load response is archived verbatim under
+        # storage/baseloads/ for later data analysis: one file per view,
+        # named {baseid}_{mode}_{UTC timestamp}.json. Never fatal.
+        if "/base/load" in path_part and int(status) == 200 and payload:
+            try:
+                save_baseload_capture(body, payload)
+            except Exception as error:  # noqa: BLE001
+                print(f"[baseloads] capture failed: {error!r}")
+
         # Learn rotations flowing THROUGH the proxy: a successful getinfo just
         # invalidated every token this request presented and minted a new one.
         # Recording presented->minted (and minted->minted) here keeps the
@@ -2793,6 +4468,13 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 minted = str(info.get("token", "")).strip()
                 minted_user = str(info.get("username", "")).strip()
                 if minted and minted_user and not info.get("error"):
+                    # Sign-in is where a rename made in the game first reaches
+                    # the viewer. Record the authoritative userid->name pair
+                    # (migrating per-name data if it moved) BEFORE the
+                    # whitelist check below, which may still list the old
+                    # name - otherwise a whitelisted player would be locked
+                    # out by their own rename.
+                    record_user_identity(info.get("userid", info.get("userId", 0)), minted_user)
                     # Sign-in whitelist: refuse to hand the session back to a
                     # player who is not allowed on this viewer. The game
                     # already rotated their token, which is harmless - they
@@ -2838,8 +4520,30 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         if not username:
             self.send_json(400, {"error": "Invalid username"})
             return
+        # Moderation-hidden players are excluded from profiles for normal
+        # users. Answer exactly like a player with no stored avatar, so the
+        # endpoint does not confirm that hiding is in effect for this name.
+        if not self.requester_is_admin():
+            hidden = hidden_name_set()
+            current = resolve_current_name(username)
+            if (username.lower() in hidden
+                    or (current and str(current).strip().lower() in hidden)):
+                self.send_json(200, {"name": username, "pic": ""})
+                return
         payload = read_json(user_dir(username) / "profile.json", {})
         pic = str(payload.get("pic", "")) if isinstance(payload, dict) else ""
+        if not pic:
+            # The name may be somebody's PREVIOUS name (they renamed in the
+            # game). Resolve it through the identity index so stale links and
+            # cached map cells still find the player's avatar - and tell the
+            # caller the current name so the UI can show it.
+            current = resolve_current_name(username)
+            current_safe = sanitize_name(current) if current else None
+            if current_safe and current_safe.lower() != username.lower():
+                payload = read_json(user_dir(current_safe) / "profile.json", {})
+                pic = str(payload.get("pic", "")) if isinstance(payload, dict) else ""
+                self.send_json(200, {"name": current, "pic": pic, "renamedFrom": username})
+                return
         self.send_json(200, {"name": username, "pic": pic})
 
     # ------------------------------------------------------------------
@@ -2850,7 +4554,7 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
     def handle_alliance(self, method: str, path: str) -> None:
         username, current_token = self.requester_identity()
         if not username:
-            self.send_json(401, {"error": "Sign in required"})
+            self.send_json(401, self.unauthenticated_payload())
             return
         endpoint = path[len("/api/alliance/"):].strip("/").split("?", 1)[0]
 
@@ -3118,8 +4822,15 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                     self.send_json(403, {"error": "You are not in an alliance"})
                     return
                 actor_rank = member_rank(mine, username)
-                if RANK_ORDER[actor_rank] < RANK_ORDER["officer"]:
-                    self.send_json(403, {"error": "Only officers and the leader can remove members"})
+                # NOTE: this rank matrix is intentionally duplicated in the
+                # client (app/static/js/viewer-app.js, renderAlliancePanel -
+                # canPromote / canDemote / canKick). The client decides which
+                # buttons to show; this is the authority. Change both together.
+                # Members may remove recruits; officers members and
+                # recruits; the leader anyone below. (Mirrors the client's
+                # rank matrix exactly.)
+                if RANK_ORDER[actor_rank] < RANK_ORDER["member"]:
+                    self.send_json(403, {"error": "Recruits cannot remove members"})
                     return
                 low = target.lower()
                 if low == username.strip().lower():
@@ -3149,19 +4860,26 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 # Promotion is leader-only, never on yourself. Demotion is
                 # leader-only on others - but an officer may step down and
                 # demote THEMSELF (officer -> member).
+                target_rank = member_rank(mine, target)
                 if endpoint == "promote":
-                    if actor_rank != "leader":
-                        self.send_json(403, {"error": "Only the leader can change ranks"})
-                        return
                     if is_self:
                         self.send_json(400, {"error": "You cannot change your own rank"})
                         return
+                    allowed = (
+                        actor_rank == "leader"
+                        or (actor_rank == "officer"
+                            and target_rank in ("recruit", "member"))
+                    )
+                    if not allowed:
+                        self.send_json(403, {"error": "Officers may promote recruits and members; only the leader can promote officers"})
+                        return
                 elif not (
                     (actor_rank == "leader" and not is_self)
+                    or (actor_rank == "officer" and not is_self and target_rank == "member")
                     or (is_self and actor_rank == "officer")
                 ):
                     self.send_json(403, {
-                        "error": "Only the leader can demote others; officers may step down themselves",
+                        "error": "Officers may demote members or step down themselves; the leader may demote anyone",
                     })
                     return
                 if not any(str(m).strip().lower() == low for m in mine["members"]):
@@ -3195,7 +4913,7 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
 
             if endpoint == "enemies":
                 # Alliance-wide enemy list: these players render red on every
-                # member's map. Any member may add or remove entries.
+                # member's map. Officers and the leader manage it.
                 action = str(body.get("action", "")).strip().lower()
                 target = str(body.get("name", "")).strip()[:80]
                 if not target or action not in ("add", "remove", "remove_alliance"):
@@ -3395,25 +5113,42 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
     # token; every response below echoes it as "token" for the client to
     # adopt (the same contract as /api/admin/me). Returns None after sending
     # the error response.
-    def require_user_access(self, username: str) -> str | None:
+    def require_user_access(self, username: str):
+        """Returns (current_token, effective_username) or None after erroring.
+
+        Rename-aware: a client that signed in before renaming keeps requesting
+        its OLD directory name for the rest of the session (the game client
+        also keeps the old name in memory until restart). Verification just
+        migrated the data to the new name, so a request for one of the
+        requester's recorded previous names is treated as a request for their
+        current directory rather than a 403.
+        """
         requester, current_token = self.requester_identity()
         if not requester:
-            self.send_json(401, {"error": "Sign in required"})
+            self.send_json(401, self.unauthenticated_payload())
             return None
         requester_dir = sanitize_name(requester) or ""
-        if requester_dir.lower() != username.lower() and requester.lower() not in admin_name_set_lower():
-            self.send_json(403, {"error": "You can only access your own data"})
-            return None
-        return current_token
+        if requester_dir.lower() == username.lower():
+            return (current_token, requester_dir)
+        current = resolve_current_name(username)
+        if current and (sanitize_name(current) or "").lower() == requester_dir.lower():
+            # The requested name is a previous name of the requester; serve
+            # their current (already-migrated) directory.
+            return (current_token, requester_dir)
+        if requester.lower() in admin_name_set_lower():
+            return (current_token, username)
+        self.send_json(403, {"error": "You can only access your own data"})
+        return None
 
     def handle_user_settings(self, method: str, raw_name: str) -> None:
         username = sanitize_name(raw_name)
         if not username:
             self.send_json(400, {"error": "Invalid username"})
             return
-        current_token = self.require_user_access(username)
-        if current_token is None:
+        access = self.require_user_access(username)
+        if access is None:
             return
+        current_token, username = access
 
         settings_path = user_dir(username) / "settings.json"
 
@@ -3447,9 +5182,10 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         if not username:
             self.send_json(400, {"error": "Invalid username"})
             return
-        current_token = self.require_user_access(username)
-        if current_token is None:
+        access = self.require_user_access(username)
+        if access is None:
             return
+        current_token, username = access
 
         logins_path = user_dir(username) / "logins.json"
 
@@ -3511,6 +5247,26 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
             return ("", current or token)
         return (username or "", current or token)
 
+    def unauthenticated_payload(self) -> dict:
+        """401 body that says WHY, so the client can react correctly.
+
+        "expired" means the game server refused the token - rotation moved
+        past this session and the player must sign in again. A transport
+        failure must not say that: the token is probably fine and the viewer
+        could not reach the game server, so telling the player to sign in
+        again sends them to re-authenticate against something that is down.
+        """
+        token = str(self.headers.get("X-Viewer-Token", "")).strip()
+        reason = token_failure_reason(token) if token else ""
+        if reason == "expired":
+            return {"error": "Your game session expired - sign in again",
+                    "reason": "expired", "retry": False}
+        if reason in ("transport", "rejected"):
+            return {"error": "Could not reach the game server to verify your "
+                             "session - try again in a moment",
+                    "reason": reason, "retry": True}
+        return {"error": "Sign in required", "reason": "anonymous", "retry": False}
+
     def requester_user(self) -> str:
         return self.requester_identity()[0]
 
@@ -3518,6 +5274,445 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
         # Compare case-insensitively on both sides: names may be written in any
         # casing, and the username the game reports may differ in case.
         return self.requester_user().lower() in admin_name_set_lower()
+
+    def route_ops(self, method: str, endpoint: str, admin: str) -> None:
+        """Operator console API. Every caller is already a verified admin -
+        route_admin gates before dispatching here.
+
+        The live view is CURSOR POLLING, not SSE, and that is a deliberate
+        change from the plan. EventSource cannot send a custom header, and auth
+        in this server is the X-Viewer-Token header with no cookie anywhere -
+        so an EventSource stream would have to carry the token in the query
+        string and leak it into this very request log. ThreadingHTTPServer also
+        gives each connection its own thread, so an open stream pins a thread
+        per watching operator. Polling /requests?since=<id> once a second is a
+        single indexed query, needs no reconnect logic, and makes pause/resume
+        simply "stop asking".
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def one(name: str, default: str = "") -> str:
+            return str(query.get(name, [default])[0])
+
+        # ---- 15. rate-limit bucket inspector -------------------------------
+        if method == "GET" and endpoint == "buckets":
+            now = time.monotonic()
+            user_rate = float(get_setting("viewerUserPerMin"))
+            user_burst = float(get_setting("viewerUserBurst"))
+            ip_rate = float(get_setting("viewerIpPerMin"))
+            ip_burst = float(get_setting("viewerIpBurst"))
+            rows = []
+            with RATE_LIMIT_LOCK:
+                snapshot = list(RATE_BUCKETS.items())
+            for key, bucket in snapshot:
+                kind = key.split(":", 1)[0]
+                rate = user_rate if kind == "user" else ip_rate
+                burst = user_burst if kind == "user" else ip_burst
+                # Replay the refill so the reading is current rather than
+                # whatever it was at the bucket's last request.
+                tokens = min(burst, bucket[0] + (now - bucket[1]) * (rate / 60.0))
+                rows.append({
+                    "key": key,
+                    "kind": kind,
+                    "tokens": round(tokens, 2),
+                    "burst": burst,
+                    "perMinute": rate,
+                    "headroom": round(100.0 * tokens / burst, 1) if burst else 0,
+                    "idleSeconds": round(now - bucket[1], 1),
+                    # Keyed on loopback means the tunnel is being treated as one
+                    # client - the bug fixed earlier. Surfaced so a regression
+                    # is visible rather than silent.
+                    "suspicious": key in ("ip:127.0.0.1", "ip:::1",
+                                          "ip:::ffff:127.0.0.1"),
+                })
+            rows.sort(key=lambda r: r["headroom"])
+            self.send_json(200, {
+                "buckets": rows,
+                "total": len(rows),
+                "idleCutoff": RATE_BUCKET_IDLE_SECONDS,
+                "limits": {"userPerMin": user_rate, "userBurst": user_burst,
+                           "ipPerMin": ip_rate, "ipBurst": ip_burst},
+            })
+            return
+
+        # ---- 17/33. sessions and the token cache ---------------------------
+        if method == "GET" and endpoint == "sessions":
+            now = time.time()
+            with TOKEN_CACHE_LOCK:
+                snapshot = list(TOKEN_CACHE.items())
+            seen, rows = {}, []
+            for token, entry in snapshot:
+                if not (isinstance(entry, tuple) and len(entry) >= 3):
+                    continue
+                username, current, expiry = entry[0], entry[1], entry[2]
+                # Tokens are secrets: only a short prefix is ever sent, enough
+                # to identify a row for revocation and nothing more.
+                rows.append({
+                    "handle": str(token)[:10],
+                    "user": str(username or "(anonymous)"),
+                    "expiresIn": int(expiry - now),
+                    "live": expiry > now,
+                    "rotated": bool(current and current != token),
+                })
+                if username:
+                    seen[str(username).lower()] = seen.get(
+                        str(username).lower(), 0) + 1
+            rows.sort(key=lambda r: (-r["expiresIn"], r["user"]))
+            self.send_json(200, {
+                "sessions": rows,
+                "users": [{"user": u, "tokens": n} for u, n in
+                          sorted(seen.items(), key=lambda kv: -kv[1])],
+                "ttl": TOKEN_CACHE_TTL,
+                "note": "Only a 10-character handle is exposed; full tokens "
+                        "never leave the server.",
+            })
+            return
+
+        if method == "POST" and endpoint == "revoke":
+            body = self.read_json_body()
+            if not isinstance(body, dict):
+                self.send_json(400, {"error": "Expected a JSON object"})
+                return
+            handle = str(body.get("handle", "")).strip()
+            target_user = str(body.get("user", "")).strip().lower()
+            if not handle and not target_user:
+                self.send_json(400, {"error": "Give a handle or a user"})
+                return
+            dropped = 0
+            with TOKEN_CACHE_LOCK:
+                for token in [t for t, e in TOKEN_CACHE.items()
+                              if (handle and str(t).startswith(handle))
+                              or (target_user and isinstance(e, tuple) and e
+                                  and str(e[0] or "").lower() == target_user)]:
+                    TOKEN_CACHE.pop(token, None)
+                    dropped += 1
+            # Dropping the cache entry does not invalidate the game token: it
+            # forces the next request to re-verify upstream, which is what
+            # "revoke" can mean from here. Said plainly so it is not mistaken
+            # for a hard sign-out.
+            append_audit(admin, "ops-revoke-cache",
+                         (handle or target_user) + f" ({dropped} entr(ies))")
+            self.send_json(200, {
+                "dropped": dropped,
+                "note": "Cache entries dropped. The next request from these "
+                        "tokens re-verifies against the game server; this is "
+                        "not a hard sign-out.",
+            })
+            return
+
+        # ---- 11. honeypot pattern editing ----------------------------------
+        if method == "POST" and endpoint == "honeypot-add":
+            body = self.read_json_body()
+            pattern = str(body.get("pattern", "")) if isinstance(body, dict) else ""
+            accepted, message = honeypot_custom_add(pattern)
+            if not accepted:
+                self.send_json(400, {"error": message})
+                return
+            append_audit(admin, "ops-honeypot-add", pattern)
+            self.send_json(200, {"message": message,
+                                 "custom": sorted(HONEYPOT_CUSTOM)})
+            return
+
+        if method == "POST" and endpoint == "honeypot-remove":
+            body = self.read_json_body()
+            pattern = str(body.get("pattern", "")) if isinstance(body, dict) else ""
+            if not honeypot_custom_remove(pattern):
+                self.send_json(400, {
+                    "error": "Not a custom pattern. Built-in patterns cannot be "
+                             "removed from the console - edit HONEYPOT_PREFIXES."})
+                return
+            append_audit(admin, "ops-honeypot-remove", pattern)
+            self.send_json(200, {"custom": sorted(HONEYPOT_CUSTOM)})
+            return
+
+        # ---- 23. audit log: filter, search, export --------------------------
+        if method == "GET" and endpoint == "audit":
+            entries = read_json(admin_dir() / "audit.json", [])
+            if not isinstance(entries, list):
+                entries = []
+            rows = [e for e in entries if isinstance(e, dict)]
+            who = one("admin").strip().lower()
+            what = one("action").strip().lower()
+            needle = one("q").strip().lower()
+            if who:
+                rows = [r for r in rows
+                        if who in str(r.get("admin", "")).lower()]
+            if what:
+                rows = [r for r in rows
+                        if what in str(r.get("action", "")).lower()]
+            if needle:
+                # Searches the whole entry, so an IP in a ban detail is findable
+                # without knowing which field it landed in.
+                rows = [r for r in rows if needle in " ".join(
+                    str(r.get(k, "")) for k in ("at", "admin", "action", "detail")
+                ).lower()]
+            since_iso = one("since").strip()
+            if since_iso:
+                rows = [r for r in rows if str(r.get("at", "")) >= since_iso]
+            rows.reverse()          # newest first
+            # The distinct action list drives the UI's dropdown, computed from
+            # the unfiltered log so filtering never hides the other options.
+            actions = sorted({str(e.get("action", "")) for e in entries
+                              if isinstance(e, dict) and e.get("action")})
+
+            if one("format") == "csv":
+                out = ["at,admin,action,detail"]
+                for r in rows:
+                    out.append(",".join(
+                        '"' + str(r.get(k, "")).replace('"', '""') + '"'
+                        for k in ("at", "admin", "action", "detail")))
+                payload = "\n".join(out).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="audit.csv"')
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+
+            limit = max(1, min(2000, int(one("limit", "200") or 200)))
+            self.send_json(200, {
+                "audit": rows[:limit],
+                "matched": len(rows),
+                "total": len(entries),
+                "actions": actions,
+            })
+            return
+
+        # ---- markup -------------------------------------------------------
+        if method == "GET" and endpoint == "console":
+            fragment = STATIC_DIR / "setup" / "ops.html"
+            try:
+                markup = fragment.read_text(encoding="utf-8")
+            except OSError:
+                self.send_json(500, {"error": "Ops console template missing"})
+                return
+            body = markup.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # ---- live request feed --------------------------------------------
+        if method == "GET" and endpoint == "requests":
+            ops_flush()          # so the caller sees its own last request
+            limit = max(1, min(1000, int(one("limit", "300") or 300)))
+            since = int(one("since", "0") or 0)
+            wheres, params = [], []
+            if since:
+                wheres.append("id > ?")
+                params.append(since)
+            band = one("status")
+            if band:
+                if band.endswith("xx"):
+                    wheres.append("status >= ? AND status < ?")
+                    params += [int(band[0]) * 100, (int(band[0]) + 1) * 100]
+                else:
+                    wheres.append("status = ?")
+                    params.append(int(band))
+            if one("method"):
+                wheres.append("method = ?")
+                params.append(one("method").upper()[:8])
+            if one("ip"):
+                wheres.append("ip = ?")
+                params.append(one("ip")[:64])
+            if one("kind"):
+                wheres.append("kind = ?")
+                params.append(one("kind")[:12])
+            if one("hideNoise", "1") == "1":
+                # The default view: scanners and non-tunnel probes are counted
+                # in the stats but kept out of the stream.
+                wheres.append("kind NOT IN ('honeypot','untunnel')")
+            clause = (" WHERE " + " AND ".join(wheres)) if wheres else ""
+            with OPS_DB_LOCK:
+                rows = ops_db().execute(
+                    "SELECT id,at,ip,method,path,status,ms,bytes,agent,priority,"
+                    "tunnel,kind FROM requests" + clause +
+                    " ORDER BY id DESC LIMIT ?", params + [limit]).fetchall()
+            cols = ("id", "at", "ip", "method", "path", "status", "ms", "bytes",
+                    "agent", "priority", "tunnel", "kind")
+            items = [dict(zip(cols, row)) for row in rows]
+            # Regex runs server-side so a filter applies to the whole retained
+            # history, not only the rows already in the browser.
+            pattern = one("q")
+            if pattern:
+                try:
+                    matcher = re.compile(pattern, re.I)
+                except re.error as error:
+                    self.send_json(400, {"error": "Bad regex: " + str(error)})
+                    return
+                items = [i for i in items
+                         if matcher.search(i["path"]) or matcher.search(i["ip"])
+                         or matcher.search(i["agent"])]
+            items.reverse()      # oldest first: the console appends downward
+            self.send_json(200, {
+                "requests": items,
+                "cursor": max([i["id"] for i in items], default=since),
+                "quiet": OPS_CONSOLE_QUIET[0],
+            })
+            return
+
+        # ---- headline numbers ---------------------------------------------
+        if method == "GET" and endpoint == "stats":
+            window = max(60, min(86400, int(one("window", "3600") or 3600)))
+            now = time.time()
+            since = now - window
+            with OPS_DB_LOCK:
+                db = ops_db()
+                buckets = db.execute(
+                    "SELECT CAST((? - at) / 60 AS INT) AS minute, kind, status, "
+                    "COUNT(*) FROM requests WHERE at >= ? "
+                    "GROUP BY minute, kind, status", (now, since)).fetchall()
+                top_ips = db.execute(
+                    "SELECT ip, COUNT(*) c, SUM(kind='honeypot') hp FROM requests "
+                    "WHERE at >= ? GROUP BY ip ORDER BY c DESC LIMIT 15",
+                    (since,)).fetchall()
+                top_paths = db.execute(
+                    "SELECT path, COUNT(*) c, MAX(status) s FROM requests "
+                    "WHERE at >= ? GROUP BY path ORDER BY c DESC LIMIT 15",
+                    (since,)).fetchall()
+                top_agents = db.execute(
+                    "SELECT agent, COUNT(*) c FROM requests WHERE at >= ? "
+                    "AND agent <> '' GROUP BY agent ORDER BY c DESC LIMIT 15",
+                    (since,)).fetchall()
+                totals = db.execute(
+                    "SELECT COUNT(*), SUM(status >= 500), SUM(status = 404), "
+                    "SUM(status = 403), SUM(kind='honeypot'), "
+                    "SUM(kind='untunnel'), AVG(ms) FROM requests WHERE at >= ?",
+                    (since,)).fetchone()
+                retained = db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+            minutes = max(1, window // 60)
+            series = {"all": [0] * minutes, "s404": [0] * minutes,
+                      "s403": [0] * minutes, "honeypot": [0] * minutes}
+            for minute, kind, status, count in buckets:
+                if minute is None or not (0 <= minute < minutes):
+                    continue
+                slot = minutes - 1 - int(minute)      # oldest first
+                series["all"][slot] += count
+                if status == 404:
+                    series["s404"][slot] += count
+                if status == 403:
+                    series["s403"][slot] += count
+                if kind == "honeypot":
+                    series["honeypot"][slot] += count
+            active = [r for r in ban_list() if r["active"]]
+            self.send_json(200, {
+                "window": window,
+                "series": series,
+                "totals": {
+                    "requests": totals[0] or 0, "errors": totals[1] or 0,
+                    "notFound": totals[2] or 0, "forbidden": totals[3] or 0,
+                    "honeypot": totals[4] or 0, "untunnelled": totals[5] or 0,
+                    "avgMs": round(totals[6] or 0, 1), "retained": retained,
+                    "dropped": OPS_DROPPED[0],
+                },
+                "topIps": [{"ip": i, "count": c, "honeypot": h or 0}
+                           for i, c, h in top_ips],
+                "topPaths": [{"path": p, "count": c, "status": s}
+                             for p, c, s in top_paths],
+                "topAgents": [{"agent": a, "count": c} for a, c in top_agents],
+                "tunnel": {
+                    "host": HOST,
+                    "boundToLoopback": HOST in ("127.0.0.1", "::1", "localhost"),
+                    "untunnelled": totals[5] or 0,
+                },
+                "bans": {
+                    "enforcing": get_setting("honeypotBansEnabled") == 1,
+                    "active": len(active),
+                    "tracked": len(ban_list()),
+                },
+            })
+            return
+
+        # ---- bans ----------------------------------------------------------
+        if method == "GET" and endpoint == "bans":
+            self.send_json(200, {
+                "bans": ban_list(),
+                "history": list(reversed(BAN_HISTORY))[:200],
+                "neverBan": sorted(BAN_NEVER),
+                "enforcing": get_setting("honeypotBansEnabled") == 1,
+                "firstMinutes": get_setting("banFirstMinutes"),
+                "maxMinutes": get_setting("banMaxMinutes"),
+            })
+            return
+
+        if method == "POST" and endpoint == "bans":
+            body = self.read_json_body()
+            if not isinstance(body, dict):
+                self.send_json(400, {"error": "Expected a JSON object"})
+                return
+            action = str(body.get("action", "")).strip()
+            target = str(body.get("ip", "")).strip()
+            if action == "ban":
+                minutes = int(body.get("minutes") or get_setting("banFirstMinutes"))
+                reason = str(body.get("reason", "manual"))
+                if not ban_add_manual(target, minutes, reason):
+                    self.send_json(400, {
+                        "error": "Refused: not a valid non-loopback address, or "
+                                 "on the never-ban list"})
+                    return
+                append_audit(admin, "ops-ban",
+                             target + " for " + str(minutes) + "m (" + reason + ")")
+                self.send_json(200, {"banned": target, "minutes": minutes})
+                return
+            if action == "unban":
+                ban_clear(target)
+                append_audit(admin, "ops-unban", target)
+                self.send_json(200, {"unbanned": target})
+                return
+            if action == "never-ban":
+                if not ops_never_ban_add(target, str(body.get("note", ""))):
+                    self.send_json(400, {"error": "Not a valid address"})
+                    return
+                append_audit(admin, "ops-never-ban", target)
+                self.send_json(200, {"neverBan": sorted(BAN_NEVER)})
+                return
+            if action == "allow-bans":
+                if not ops_never_ban_remove(target):
+                    self.send_json(400, {
+                        "error": "Loopback cannot be removed: cloudflared "
+                                 "connects over it, so allowing it to be banned "
+                                 "would take the site offline"})
+                    return
+                append_audit(admin, "ops-allow-bans", target)
+                self.send_json(200, {"neverBan": sorted(BAN_NEVER)})
+                return
+            self.send_json(400, {"error": "Unknown action: " + action})
+            return
+
+        # ---- honeypot patterns + live tester -------------------------------
+        if method == "GET" and endpoint == "honeypots":
+            self.send_json(200, {
+                "prefixes": list(HONEYPOT_PREFIXES),
+                "exact": list(HONEYPOT_EXACT),
+                "custom": sorted(HONEYPOT_CUSTOM),
+            })
+            return
+
+        if method == "POST" and endpoint == "honeypot-test":
+            body = self.read_json_body()
+            paths = body.get("paths") if isinstance(body, dict) else None
+            if not isinstance(paths, list):
+                self.send_json(400, {"error": "Expected {paths: [...]}"})
+                return
+            self.send_json(200, {"results": [
+                {"path": str(p)[:200], "match": is_honeypot_path(str(p))}
+                for p in paths[:50]]})
+            return
+
+        # ---- journal verbosity ---------------------------------------------
+        if method == "POST" and endpoint == "quiet":
+            body = self.read_json_body()
+            OPS_CONSOLE_QUIET[0] = (bool(body.get("quiet", True))
+                                    if isinstance(body, dict) else True)
+            self.send_json(200, {"quiet": OPS_CONSOLE_QUIET[0]})
+            return
+
+        self.send_json(404, {"error": "Unknown ops endpoint: " + endpoint})
 
     def route_admin(self, method: str, path: str) -> None:
         endpoint = path[len("/api/admin/"):].strip("/")
@@ -3804,6 +5999,13 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
 
         admin = self.requester_user()
 
+        # ------------------------------------------------------------------
+        # Operator console (/setup/ops)
+        # ------------------------------------------------------------------
+        if endpoint.startswith("ops"):
+            self.route_ops(method, endpoint[3:].strip("/"), admin)
+            return
+
         if method == "GET" and endpoint == "console":
             # The admin console markup lives in a separate file that is only
             # ever sent to a verified administrator, so the sensitive UI is
@@ -3827,6 +6029,77 @@ class StaticViewerHandler(SimpleHTTPRequestHandler):
                 "admins": sorted(load_admin_users(), key=str.lower),
                 "you": admin,
             })
+            return
+
+        # ------------------------------------------------------------------
+        # Username changes. GET lists every rename the identity index has
+        # recorded; POST applies one BY HAND for renames that predate the
+        # index (the viewer never saw the old name paired with a userid, so
+        # automatic detection has nothing to compare against). Manual moves
+        # are admin-only on purpose: letting a player "claim" an arbitrary
+        # old name would hand them that name's settings, alliance seat and
+        # any allowlist entries.
+        # ------------------------------------------------------------------
+        if method == "GET" and endpoint == "renames":
+            entries = []
+            for uid, entry in load_users_index().items():
+                if not isinstance(entry, dict):
+                    continue
+                previous = [str(p) for p in entry.get("previous", []) if str(p).strip()]
+                if not previous:
+                    continue
+                entries.append({
+                    "userid": uid,
+                    "name": str(entry.get("name", "")),
+                    "previous": previous,
+                    "updatedAt": str(entry.get("updatedAt", "")),
+                })
+            entries.sort(key=lambda e: e.get("updatedAt", ""), reverse=True)
+            self.send_json(200, {"renames": entries})
+            return
+
+        if method == "POST" and endpoint == "rename-user":
+            body = self.read_json_body()
+            if body is None:
+                return
+            old = str(body.get("from", "")).strip()
+            new = str(body.get("to", "")).strip()
+            if (not old or not new or len(old) > 80 or len(new) > 80
+                    or not sanitize_name(old) or not sanitize_name(new)):
+                self.send_json(400, {"error": "Body must be {from, to} with valid player names"})
+                return
+            if old.lower() == new.lower() and old == new:
+                self.send_json(400, {"error": "Those are the same name"})
+                return
+            with STORAGE_LOCK:
+                summary = migrate_username_locked(old, new)
+                # Keep the identity index consistent with the manual move so
+                # resolve_current_name() (profile fallback, mid-session
+                # settings access) knows about this rename too. Only an entry
+                # that currently carries the OLD name is touched - if the
+                # index already tracks the new name the game told us so and
+                # there is nothing to patch.
+                index = load_users_index()
+                patched = False
+                for entry in index.values():
+                    if isinstance(entry, dict) and str(entry.get("name", "")).strip().lower() == old.lower():
+                        previous = [str(p) for p in entry.get("previous", []) if str(p).strip()]
+                        if old.lower() != new.lower():
+                            previous = [p for p in previous
+                                        if p.strip().lower() != old.lower()] + [old]
+                        entry.update({
+                            "name": new,
+                            "previous": previous[-10:],
+                            "updatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        })
+                        patched = True
+                if patched:
+                    atomic_write_json(users_index_path(), index)
+            rename_token_cache(old, new)
+            with PLAYER_INDEX_LOCK:
+                PLAYER_INDEX.clear()
+            append_audit(admin, "rename-user", f"{old} -> {new} ({summary})")
+            self.send_json(200, {"summary": summary})
             return
 
         if method == "POST" and endpoint == "admins":
@@ -4173,11 +6446,17 @@ def main() -> None:
     # Loads today's rollup back into memory and starts the background writer,
     # so counters continue across a restart instead of resetting to zero.
     start_metrics_writer()
+    start_history_writer()
 
     handler = partial(StaticViewerHandler, directory=str(STATIC_DIR))
+    start_ops_writer()
     server = ThreadingHTTPServer((HOST, PORT), handler)
     print(f"Serving BYM MR2 Viewer at http://{HOST}:{PORT} (dev_server {SERVER_VERSION})")
-    print(f"Hidden-player tile style: {HIDDEN_TILE_STYLE} (BYM_HIDDEN_TILE_STYLE=blend|water)")
+    print(f"Hidden-player tile style: {HIDDEN_TILE_STYLE} (BYM_HIDDEN_TILE_STYLE=tribe|water)")
+    _version = bym_api_version()
+    print(f"Game API version: {_version}"
+          + (" (pinned via BYM_API_VERSION)" if BYM_API_VERSION_PIN
+             else f" (from {BYM_VERSION_MANIFEST})"))
     _admins = sorted(load_admin_users(), key=str.lower)
     if _admins:
         print(f"Admin console: http://localhost:{PORT}/setup/ (admins: {', '.join(_admins)})")

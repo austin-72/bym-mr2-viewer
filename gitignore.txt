@@ -1,0 +1,25 @@
+# Runtime state - per-deployment data, and the zone cache, base snapshots
+# and logs contain player data. Never commit these.
+# (Both layouts: STORAGE_DIR at the repo root, or start.bat's ./storage.)
+storage/
+server_*/
+imagecache/
+users/
+users_archived/
+users_index.json
+admin/
+alliances/
+baseloads/
+logs/
+metrics/
+backups/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
