@@ -24,7 +24,7 @@
 //  - Construction / upgrade countdowns (cB / cU seconds remaining as of
 //    savetime) shown as live badges.
 
-import { harvesterInfo, HARVESTER_RESOURCE } from "./gamedata.js";
+import { harvesterInfo, HARVESTER_RESOURCE, monsterRow } from "./gamedata.js";
 
 const CELL = 20;
 const YARD_HALF = 1300; // cartesian half-extent of the buildable yard
@@ -53,6 +53,26 @@ function mulberry32(seed) {
 }
 
 // Periodic (stitched) 2-octave Perlin over a GROUND_W x GROUND_H bitmap.
+/**
+ * The mask MakeTile blends each layer through:
+ *
+ *   groundMask.perlinNoise(50 * tile, 25 * tile, 2, BASE._baseSeed + 1 + tile,
+ *                          true, false, BitmapDataChannel.ALPHA, true, null);
+ *
+ * In order: baseX, baseY, numOctaves = 2, randomSeed, stitch = true,
+ * fractalNoise = FALSE, channel = ALPHA, grayScale = true, offsets = null.
+ *
+ * fractalNoise = false selects TURBULENCE, which takes the absolute value of
+ * each octave before summing - so the lattice runs signed over [-1, 1] and
+ * every octave is folded through Math.abs. That is what produces turbulence's
+ * characteristic creases, and it is a different field from the all-positive
+ * sum this used to compute.
+ *
+ * Flash's perlinNoise uses an internal seeded PRNG that cannot be reproduced
+ * outside the player, so the blotch pattern for a given _baseSeed will differ
+ * from the game's. Frequencies, octave count, turbulence, wrapping and the
+ * per-layer seed are the client's.
+ */
 function perlinAlpha(baseX, baseY, seed) {
   const octaves = 2;
   const data = new Float32Array(GROUND_W * GROUND_H);
@@ -64,7 +84,8 @@ function perlinAlpha(baseX, baseY, seed) {
     const rand = mulberry32(seed * 7919 + octave * 104729);
     const lattice = new Float32Array((cols + 1) * (rows + 1));
     for (let ly = 0; ly < rows; ly++) {
-      for (let lx = 0; lx < cols; lx++) lattice[ly * (cols + 1) + lx] = rand();
+      // Signed, so turbulence's Math.abs below has something to fold.
+      for (let lx = 0; lx < cols; lx++) lattice[ly * (cols + 1) + lx] = rand() * 2 - 1;
     }
     // Stitch: wrap edges so the tile is seamless.
     for (let ly = 0; ly <= rows; ly++) lattice[ly * (cols + 1) + cols] = lattice[(ly % rows) * (cols + 1)];
@@ -84,14 +105,31 @@ function perlinAlpha(baseX, baseY, seed) {
         const i11 = lattice[(y0 + 1) * (cols + 1) + x0 + 1];
         const top = i00 + (i10 - i00) * tx;
         const bottom = i01 + (i11 - i01) * tx;
-        data[y * GROUND_W + x] += (top + (bottom - top) * ty) * amplitude;
+        // Turbulence (fractalNoise = false): absolute value per octave.
+        data[y * GROUND_W + x] += Math.abs(top + (bottom - top) * ty) * amplitude;
       }
     }
   }
   return data;
 }
 
+// server/public/assets/buildings/i* - the Inferno art tree. Anything not
+// listed here has no Inferno counterpart and keeps its overworld sprites.
+const INFERNO_ART_DIRS = new Set([
+  "iacademy", "iboneharvester", "icannontower", "icoalproducer", "ihatchery",
+  "ihousingbunker", "imagmaproducer", "imagmatower", "imonsterlab", "iportal",
+  "iquaketower", "isnipertower", "ispurtz_cannon", "istoragesilo",
+  "isulpherproducer", "itownhall", "iwalls",
+]);
+
 const THEMES = {
+  // The unmatched-texture result: MakeTile returns a transparent tile.
+  blank: {
+    tiles: [],
+    base: "transparent",
+    void: "#101010",
+    grid: "rgba(0, 0, 0, 0.08)",
+  },
   grass: {
     tiles: [
       "/assets/yardbg/grass/isograss1.png",
@@ -104,6 +142,38 @@ const THEMES = {
     ],
     base: "#2f4a20",
     void: "#101c10",
+    grid: "rgba(0, 0, 0, 0.08)",
+  },
+  // MAPBG.MakeTile's own sets. rock deliberately mixes three rock tiles with
+  // the first two grass ones - that is the client's list, not a substitution.
+  rock: {
+    tiles: [
+      "/assets/yardbg/rock/isorock1.png",
+      "/assets/yardbg/rock/isorock2.png",
+      "/assets/yardbg/rock/isorock3.png",
+      "/assets/yardbg/grass/isograss1.png",
+      "/assets/yardbg/grass/isograss2.png",
+    ],
+    base: "#4a4438",
+    void: "#151310",
+    grid: "rgba(0, 0, 0, 0.08)",
+  },
+  sand: {
+    tiles: [
+      "/assets/yardbg/sand/isosand1.png",
+      "/assets/yardbg/sand/isosand2.png",
+      "/assets/yardbg/sand/isosand3.png",
+      "/assets/yardbg/sand/isosand4.png",
+    ],
+    base: "#b5a172",
+    void: "#1c1810",
+    grid: "rgba(0, 0, 0, 0.08)",
+  },
+  // MAP_TYPE_CRATER. One tile, as MAPBG.MakeTile has it.
+  crater: {
+    tiles: ["/assets/yardbg/rock/isocrater1.png"],
+    base: "#5a5147",
+    void: "#171410",
     grid: "rgba(0, 0, 0, 0.08)",
   },
   lava: {
@@ -119,9 +189,12 @@ const THEMES = {
   },
 };
 const ANIM_FRAME_MS = 1000 / 24; // building anim strips
-// Pen movement advances once per ENTER_FRAME, and the SWF header declares
-// 40fps - stepping at 24 ran creeps and champions at 60% of game speed.
-const PEN_FRAME_MS = 1000 / 40;
+// Pen and battle movement advance on the game's 80/s LOGIC loop, not the
+// stage frame rate: GLOBAL.TickFast banks 2 iterations per 25ms and runs
+// CREEPS.Tick, CREATURES.Tick and the guardian list inside that loop, each
+// calling move() once per iteration. (An earlier reading assumed movement
+// was per-ENTER_FRAME at 40fps, which ran everything at half speed.)
+const PEN_FRAME_MS = 1000 / 80;
 const HATCH_FRAME_MS = 1000 / 12; // BUILDING13.TickFast: every 2nd frame
 
 // BuildingOverlay strips: a 51x300 sheet of 50 progress rows and a 51x120
@@ -170,6 +243,12 @@ const ANIM_START_AT_ZERO = new Set([9, 19, 25, 54]); // BFOUNDATION Setup
 // nothing is happening, so each rule below mirrors the class that owns it.
 
 // Idle machinery: the strip exists but the game never loops it here.
+// Footprint multipliers for the forgiving second hit-test pass. Only for
+// buildings that exist to be clicked; everything else keeps its exact box.
+const HIT_FORGIVENESS = new Map([
+  [127, 2.2], // Inferno Cavern - the sole entrance to the Inferno yard
+]);
+
 const NEVER_ANIMATE = new Set([
   9,   // Monster Juicer
   19,  // Wild Monster Baiter
@@ -190,12 +269,35 @@ const TURRET_TYPES = new Set([
   132, // Inferno Magma Tower
   136, // Spurtz Cannon
   137, // Black Spurtz Cannon
+  // Cannon towers were missing, so they fell through to the generic
+  // animated path and span their idle strip. Both stay listed so the strip
+  // never loops - but note the split: INFERNO_CANNON_TOWER (130) calls
+  // BTOWER.Rotate and genuinely tracks, while BUILDING20 (the main-yard
+  // Cannon Tower) calls NO rotation path at all - its class has no Rotate
+  // call and BTOWER.TickAttack never rotates - so 20 must rest on frame 0
+  // forever (turretFrame enforces that).
+  20,  // Cannon Tower (static - never rotates in the live client)
+  130, // Inferno Cannon Tower
+  // NOT 129 (Inferno Quake Tower): it is in NEVER_ANIMATE, but the turret
+  // branch in drawAnimStrip runs BEFORE shouldAnimate is consulted, so
+  // listing it here silently overrode that and spun it to track the pointer.
+  // A quake tower has no barrel to aim - it rests on frame 0.
 ]);
 const TURRET_HEADINGS = 32; // BTOWER.Rotate: 360 / 11.25
+// Per-class overrides: the laser's Track divides by 6.66 (54 frames); the
+// flak's inline rotation and the railgun's both divide by 12 (30 frames);
+// and the railgun adds +30 degrees to the heading BEFORE bucketing
+// (BUILDING118.TickAttack: `atan2 * 57.2957795 + 30`) - its art is drawn
+// rotated a bucket-and-a-half off axis.
+const TURRET_HEADING_OFFSET = new Map([[118, 30]]);
 // BUILDING23.Track divides by 6.66 instead, so the laser tower's strip is a
 // 54-step rotation rather than the usual 32. Indexing its sheet as 32 makes
 // the barrel lag the pointer by an ever-growing angle.
-const TURRET_HEADINGS_BY_TYPE = new Map([[23, 54]]); // 360 / 6.66
+const TURRET_HEADINGS_BY_TYPE = new Map([
+  [23, 54],   // 360 / 6.66 (Track callback)
+  [115, 30],  // 360 / 12   (BUILDING115.TickAttack inline)
+  [118, 30],  // 360 / 12   (BUILDING118.TickAttack inline, +30 deg bias)
+]);
 
 // Buildings that animate only while working. Each predicate takes the raw
 // save record and returns whether that job is running.
@@ -237,6 +339,9 @@ export class YardRenderer {
     this.healthData = {};
     this.savetime = 0;
     this.theme = THEMES.grass;
+    this.infernoArt = false;
+    // See artBase(): the directory-prefix mapping is not usable as-is.
+    this.infernoArtPathsVerified = false;
     this.champions = [];
     this.penEntities = []; //  HOUSING.Populate + CHAMPIONCAGE.SpawnGuardian
     this.penTick = 0;
@@ -282,7 +387,9 @@ export class YardRenderer {
       if (this.penEntities.length) {
         const now = Math.floor(performance.now() / PEN_FRAME_MS);
         if (!this.lastPenStep) this.lastPenStep = now;
-        const steps = Math.min(16, now - this.lastPenStep);
+        // Cap catch-up at ~400ms of banked steps (32 x 12.5ms), the same
+        // wall-clock tolerance as before the tick rate doubled to 80/s.
+        const steps = Math.min(32, now - this.lastPenStep);
         if (steps > 0) {
           this.stepPens(steps);
           this.lastPenStep = now;
@@ -334,7 +441,12 @@ export class YardRenderer {
   // ── data ──────────────────────────────────────────────────────────────
 
   setTheme(name) {
-    this.theme = THEMES[name] || THEMES.grass;
+    // A null/unmatched texture is not an error and must not become grass:
+    // MakeTile sets tileCount = 0 before its texture branches, so every loop
+    // that would touch a layer runs zero times and it returns a fully
+    // transparent 1000x500 tile. THEMES.blank reproduces that - no tiles, and
+    // a transparent base so nothing is painted under the yard.
+    this.theme = THEMES[name] || THEMES.blank;
     this.groundCanvas = null; // rebuild for the new tile set
     this.invalidate();
   }
@@ -348,6 +460,9 @@ export class YardRenderer {
       this.sprite(path.startsWith("/") ? path : this.assetBase + path));
     if (!tiles.every((entry) => entry.ready)) return null;
     const composite = document.createElement("canvas");
+    // tileCount == 0 (the unmatched-texture path): the buffer is created and
+    // returned untouched, i.e. fully transparent. Handled before the layer-1
+    // draw below, which would otherwise dereference tiles[0].
     composite.width = GROUND_W;
     composite.height = GROUND_H;
     const cctx = composite.getContext("2d");
@@ -356,11 +471,25 @@ export class YardRenderer {
       c.width = GROUND_W;
       c.height = GROUND_H;
       const sctx = c.getContext("2d");
+      // MakeTile copies new Rectangle(0, 0, 200, 100) out of each source, so
+      // the 200x101 assets (every isorock and isosand) are CROPPED by a row
+      // rather than drawn whole. Blitting the full image instead let that
+      // extra row bleed into the stamp below it, 25 times per layer.
       for (let h = 0; h < 5; h++) {
-        for (let v = 0; v < 5; v++) sctx.drawImage(entry.img, h * 200, v * 100);
+        for (let v = 0; v < 5; v++) {
+          sctx.drawImage(
+            entry.img,
+            0, 0, GRASS_W, GRASS_H,
+            h * GRASS_W, v * GRASS_H, GRASS_W, GRASS_H,
+          );
+        }
       }
       return c;
     };
+    if (!tiles.length) {
+      this.groundCanvas = composite;
+      return composite;
+    }
     cctx.drawImage(sheet(tiles[0]), 0, 0);
     const seed = Number(this.baseSeed) || 0;
     for (let tile = 2; tile <= tiles.length; tile++) {
@@ -432,6 +561,44 @@ export class YardRenderer {
     this.invalidate();
   }
 
+  /**
+   * Inferno reuses the overworld building data but its art lives in a
+   * parallel tree: server/public/assets/buildings/i* mirrors the normal
+   * directories with an "i" prefix (academy -> iacademy, cannontower ->
+   * icannontower, townhall -> itownhall, and so on). Anything without an
+   * Inferno counterpart falls back to the overworld art.
+   */
+  /**
+   * "buildings/academy/" -> "buildings/iacademy/" when Inferno art is on.
+   *
+   * Only rewrites to directories that actually exist under
+   * server/public/assets/buildings, so a building with no Inferno counterpart
+   * keeps its overworld art instead of 404ing. iportal is in the list because
+   * the cavern's art is already Inferno-named - without the check it would
+   * become "iiportal".
+   */
+  artBase(baseurl) {
+    if (!this.infernoArt) return baseurl;
+    const parts = String(baseurl || "").split("/").filter(Boolean);
+    if (parts.length !== 2 || parts[0] !== "buildings") return baseurl;
+    const inferno = `i${parts[1]}`;
+    // DISABLED: the i* directories do not mirror the overworld file names.
+    // academy/ has anim.1.v2.png, anim.2.png ...; iacademy/ has anim1.2.png,
+    // shadow.1.jpg ... - so rewriting the directory alone points at files
+    // that do not exist and every sprite fails to load. Inferno buildings
+    // need their own imageData (yardprops already has entries such as id 130
+    // #b_icannontower#, but with imageData null in this copy), not a path
+    // prefix. Left in place, and inert, so the finding is not lost.
+    return INFERNO_ART_DIRS.has(inferno) && this.infernoArtPathsVerified
+      ? `buildings/${inferno}/` : baseurl;
+  }
+
+  setInfernoArt(enabled) {
+    this.infernoArt = Boolean(enabled);
+    this.spriteCache?.clear?.();
+    this.invalidate();
+  }
+
   setBuildings(buildingData, { healthData = {}, savetime = 0, servertime = 0, baseseed = 0 } = {}) {
     this.healthData = healthData || {};
     if (this.baseSeed !== Number(baseseed)) {
@@ -467,7 +634,10 @@ export class YardRenderer {
         const id = record.id ?? Number(key);
 
         // Damage state from buildinghealthdata (hp by building id).
-        const maxHp = this.gameData.hp(t, l);
+        // BFOUNDATION.getEffectiveLevel: in MR2 the Flinger's hp is capped
+        // at level 4 and Housing at level 6, whatever the save says.
+        const hpLevel = t === 5 ? Math.min(l, 4) : t === 15 ? Math.min(l, 6) : l;
+        const maxHp = this.gameData.hp(t, hpLevel);
         const hp = this.healthData[id] ?? this.healthData[String(id)];
         let state = "";
         if (hp !== undefined && maxHp) {
@@ -541,6 +711,7 @@ export class YardRenderer {
       .sort((a, b) => a.y - b.y || a.x - b.x);
 
     this.refreshAnimationState();
+    this.buildBlockGrid();
     this.hasCountdowns = this.buildings.some(
       (b) => b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt,
     );
@@ -715,6 +886,25 @@ export class YardRenderer {
         this.invalidate();
         if (this.onSelect) this.onSelect(this.selected);
       }
+      // Separate from onSelect, which is gated behind `interactive` - the
+      // read-only base popup runs with interactive:false to suppress
+      // selection and drag, but still needs individual buildings to be
+      // clickable (the Inferno Cavern opens its popup this way).
+      //
+      // onYardClick fires first with the world point of ANY click on the
+      // yard (there does not have to be a building under it - a catapult
+      // bomb lands wherever the attacker aims). Returning true consumes
+      // the click, so an armed bomb does not also open the Inferno popup.
+      if (!moved && !wasPinching) {
+        if (this.onYardClick
+          && this.onYardClick(this.screenToWorld(event), event) === true) {
+          return;
+        }
+        if (this.onBuildingClick) {
+          const clicked = this.hitTest(event);
+          if (clicked) this.onBuildingClick(clicked);
+        }
+      }
     });
     canvas.addEventListener("pointercancel", (event) => {
       releasePointer(event);
@@ -758,14 +948,30 @@ export class YardRenderer {
 
   hitTest(event) {
     const point = this.screenToWorld(event);
-    for (let i = this.buildings.length - 1; i >= 0; i--) {
-      const b = this.buildings[i];
-      const size = this.gameData.footprint(b.t);
+    const test = (b, scale) => {
+      const size = this.gameData.footprint(b.t) * scale;
       const halfW = size;
       const halfH = size / 2;
       const dx = Math.abs(point.x - b.x);
       const dy = Math.abs(point.y - (b.y + halfH));
-      if (dx / halfW + dy / halfH <= 1) return b;
+      return dx / halfW + dy / halfH <= 1;
+    };
+
+    for (let i = this.buildings.length - 1; i >= 0; i--) {
+      if (test(this.buildings[i], 1)) return this.buildings[i];
+    }
+
+    // Second pass, forgiving boxes only. The Inferno Cavern is the one
+    // building that is purely a control - clicking it is the only way into
+    // the Inferno yard - and its 100-unit footprint makes a small target that
+    // sits off in empty ground at (-1200, -150). Running this as a SEPARATE
+    // pass rather than simply enlarging the box means an exact hit on any
+    // neighbour still wins: the wider box only catches what would otherwise
+    // have been a miss.
+    for (let i = this.buildings.length - 1; i >= 0; i--) {
+      const b = this.buildings[i];
+      const scale = HIT_FORGIVENESS.get(Number(b.t));
+      if (scale && test(b, scale)) return b;
     }
     return null;
   }
@@ -784,6 +990,16 @@ export class YardRenderer {
         this.invalidate();
       };
       img.onerror = () => {
+        // 4 retries, 5s apart, cache-busted; only then mark it failed.
+        const tries = Number(img.dataset?.retryCount || 0);
+        if (tries < 4) {
+          if (img.dataset) img.dataset.retryCount = String(tries + 1);
+          const base = img.src.split(/[?&]retry=/)[0];
+          window.setTimeout(() => {
+            img.src = `${base}${base.includes("?") ? "&" : "?"}retry=${tries + 1}`;
+          }, 5000);
+          return;
+        }
         entry.failed = true;
       };
       img.src = url;
@@ -806,6 +1022,7 @@ export class YardRenderer {
       if (!bundle?.entry?.["anim" + suffix] || b.state === "destroyed") return false;
       // Turrets redraw on pointer movement, not on a timer.
       if (TURRET_TYPES.has(b.t)) return false;
+      if (this.isMidJob(b)) return false;
       return b.t === 6 || this.shouldAnimate(b);
     });
     this.hasAnimations = this.hasAnimations || this.penEntities.length > 0;
@@ -858,7 +1075,7 @@ export class YardRenderer {
     const spec = this.layerSpec(bundle.entry, which, b.state);
     if (!spec) return;
     const [file, offset] = spec;
-    const entry = this.sprite(this.assetBase + bundle.baseurl + file);
+    const entry = this.sprite(this.assetBase + this.artBase(bundle.baseurl) + file);
     if (!entry.ready) return;
     const [ox, oy] = Array.isArray(offset) ? offset : [0, 0];
     this.ctx.drawImage(entry.img, b.x + ox, b.y + oy);
@@ -899,6 +1116,9 @@ export class YardRenderer {
 
     for (const decal of this.effects) this.drawEffect(decal);
     for (const b of this.buildings) this.drawBuilding(b, "shadow");
+    // Landed bomb debris: the game parents it to mcbottom, under every
+    // building top but over the ground and shadows - exactly this slot.
+    if (this.simOverlay?.drawGround) this.simOverlay.drawGround(ctx);
     if (this.hovered && this.hovered !== this.selected) this.drawFootprint(this.hovered, false);
     if (this.selected) this.drawFootprint(this.selected, true);
     // Building tops, pen creatures, and mushrooms share one depth sort,
@@ -938,6 +1158,10 @@ export class YardRenderer {
     // BuildingOverlay is a child of the building's own clip in game, so it
     // sits inside the camera transform and scales with zoom.
     for (const b of this.buildings) this.drawBuildingOverlay(b);
+    // In-flight bomb particles and the aiming drop zone: mctop, over
+    // everything else in the yard but still under the screen-space HUD.
+    if (this.simOverlay?.drawAir) this.simOverlay.drawAir(ctx);
+
     this.hasCountdowns = this.buildings.some(
       (b) => b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt,
     );
@@ -979,9 +1203,13 @@ export class YardRenderer {
     this.traceYardDiamond();
     ctx.clip();
 
-    // Base tone under the tiles (visible until they load / at far zoom)
-    ctx.fillStyle = this.theme.base;
-    ctx.fill();
+    // Base tone under the tiles (visible until they load / at far zoom).
+    // A blank theme has none: MakeTile's transparent result means no ground,
+    // so painting a colour here would invent one.
+    if (this.theme.base !== "transparent") {
+      ctx.fillStyle = this.theme.base;
+      ctx.fill();
+    }
 
     // Rect-tile the isograss variants across the visible clipped region,
     // variant chosen by a stable per-cell hash so the mix never flickers.
@@ -1003,16 +1231,21 @@ export class YardRenderer {
         }
       }
     } else {
-      // Fallback while tile sprites stream in.
-      for (let gy = startGY; gy < bottom; gy += GRASS_H) {
-        for (let gx = startGX; gx < right; gx += GRASS_W) {
-          const tiles = this.theme.tiles;
-          const hash = Math.abs(((gx / GRASS_W) * 73856093) ^ ((gy / GRASS_H) * 19349663)) % tiles.length;
-          const path = tiles[hash];
-          const entry = this.sprite(path.startsWith("/") ? path : this.assetBase + path);
-          if (entry.ready) ctx.drawImage(entry.img, gx, gy);
-        }
-      }
+      // No per-tile fallback while the sprites stream in.
+      //
+      // buildGround() composites theme.tiles in MAPBG's own order, each
+      // layered over the last through a perlin alpha mask, so the tiles that
+      // composite LAST dominate the finished ground. The rock set is
+      // [isorock1..3, isograss1, isograss2], meaning grass covers most of the
+      // rock. Hash-picking uniformly across that same array painted a roughly
+      // 60% stone field first, which the composite then replaced with mostly
+      // grass one frame later - the stone flash.
+      //
+      // Reproducing the blend here would mean guessing MAPBG.MakeTile's alpha
+      // weights. The flat theme.base fill underneath is already the terrain's
+      // own average colour, so simply waiting is both accurate and cheaper:
+      // the ground fades from the right colour to the right texture instead
+      // of flashing the wrong one.
     }
 
     // 20-unit build lattice, only inside the yard, only when zoomed in.
@@ -1075,7 +1308,7 @@ export class YardRenderer {
     const animates = this.hasAnimLayer(b, bundle);
     if (spec) {
       const [file, offset] = spec;
-      const entry = this.sprite(this.assetBase + bundle.baseurl + file);
+      const entry = this.sprite(this.assetBase + this.artBase(bundle.baseurl) + file);
       if (entry.failed && layer === "top") {
         if (!animates) this.drawPlaceholder(b);
       } else if (entry.ready) {
@@ -1113,7 +1346,7 @@ export class YardRenderer {
     if (!Array.isArray(spec) || spec.length < 3) return;
     const [file, rect, frames] = spec;
     if (!Array.isArray(rect) || !frames) return;
-    const entry = this.sprite(this.assetBase + bundle.baseurl + file);
+    const entry = this.sprite(this.assetBase + this.artBase(bundle.baseurl) + file);
     if (!entry.ready) return;
     const [rx, ry, fw, fh] = rect;
 
@@ -1122,12 +1355,57 @@ export class YardRenderer {
     // before every other rule, including the "animations off" toggle, because
     // this is orientation, not animation.
     if (TURRET_TYPES.has(b.t)) {
-      const frame = this.turretFrame(b, frames);
+      // Railgun note: its base anim file already IS anim.N.loaded.png -
+      // the charged-rails art is the only direction sheet that ships, so
+      // no state swap exists to make. (A previous "loaded variant" swap
+      // here fetched a nonexistent .loaded.loaded file; removed.)
+      const frame = this.isMidJob(b) ? 0 : this.turretFrame(b, frames);
       this.ctx.drawImage(entry.img, frame * fw, 0, fw, fh, b.x + rx, b.y + ry, fw, fh);
       return;
     }
 
     let frame;
+    if (b.simAnim) {
+      // A combat animation the attack sim is driving. Plain form: play the
+      // strip once, linearly, across the window. Phased form (tesla,
+      // quake, bunker doors): each phase spans `ms` and maps f0..f1
+      // linearly (descending when f1 < f0 - a door closing), or - with
+      // loopMs set - cycles f0..f1 at one frame per loopMs. holdLast
+      // parks the strip on its final frame instead of snapping back to 0,
+      // which is how an open bunker door stays open.
+      const elapsed = performance.now() - b.simAnim.startedAt;
+      if (elapsed >= b.simAnim.durationMs) {
+        if (b.simAnim.holdLast) {
+          const ph = Array.isArray(b.simAnim.phases)
+            ? b.simAnim.phases[b.simAnim.phases.length - 1] : null;
+          frame = Math.max(0, Math.min(frames - 1, ph ? ph.f1 : frames - 1));
+        } else {
+          b.simAnim = null;
+          frame = 0;
+        }
+      } else if (Array.isArray(b.simAnim.phases)) {
+        let left = elapsed;
+        frame = 0;
+        for (const ph of b.simAnim.phases) {
+          if (left >= ph.ms) { left -= ph.ms; frame = ph.f1; continue; }
+          if (ph.loopMs) {
+            frame = ph.f0 + (Math.floor(left / ph.loopMs)
+              % (Math.abs(ph.f1 - ph.f0) + 1));
+          } else {
+            const span = Math.abs(ph.f1 - ph.f0) + 1;
+            const idx = Math.floor((left / ph.ms) * span);
+            frame = ph.f0 + (ph.f1 >= ph.f0 ? idx : -idx);
+          }
+          break;
+        }
+        frame = Math.max(0, Math.min(frames - 1, frame));
+      } else {
+        const t = elapsed / b.simAnim.durationMs;
+        frame = Math.min(frames - 1, Math.floor(t * frames));
+      }
+      this.ctx.drawImage(entry.img, frame * fw, 0, fw, fh, b.x + rx, b.y + ry, fw, fh);
+      return;
+    }
     if (b.t === 6) {
       // BUILDING6: the anim strip is a storage-fullness gauge, not a loop -
       // it keeps its state frame even with animations disabled.
@@ -1146,15 +1424,24 @@ export class YardRenderer {
     this.ctx.drawImage(entry.img, frame * fw, 0, fw, fh, b.x + rx, b.y + ry, fw, fh);
   }
 
+  /**
+   * Whether the building is running a job that freezes its artwork:
+   * building, upgrading, fortifying, rebuilding, or already destroyed.
+   * BFOUNDATION gates every anim on _countdownBuild + _countdownUpgrade == 0.
+   */
+  isMidJob(b) {
+    return Boolean(
+      b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt || b.rebuildEndsAt
+      || b.state === "destroyed",
+    );
+  }
+
   /** Whether this building's looping strip should be running right now. */
   shouldAnimate(b) {
     if (NEVER_ANIMATE.has(b.t)) return false;
 
-    // Nothing animates while the building is mid-job: BFOUNDATION gates every
-    // anim on _countdownBuild + _countdownUpgrade == 0, and the same applies
-    // to fortifying and rebuilding.
     const raw = b.raw || {};
-    if (b.buildEndsAt || b.upgradeEndsAt || b.fortifyEndsAt || b.rebuildEndsAt) {
+    if (this.isMidJob(b)) {
       return false;
     }
 
@@ -1178,12 +1465,39 @@ export class YardRenderer {
    * so the full circle stays reachable.
    */
   turretFrame(b, frames) {
-    if (!this.aimPoint) return 0; // untouched: rests bottom-right, as in game
+    // BUILDING20 - the main-yard Cannon Tower - has NO rotation path in
+    // the live client: no Rotate call, no inline atan2. Its direction
+    // sheet rests on frame 0 forever, cursor or battle notwithstanding.
+    if (b.t === 20) return 0;
+    // SpurtzCannon carries a CONTINUOUS barrel angle (1 deg per logic
+    // tick) rather than snapping at a target; the sim publishes it as
+    // simRot and renderRotation buckets it: int((rot + 180) / 11.25).
+    if ((b.t === 136 || b.t === 137) && this.simTurretMode
+      && typeof b.simRot === "number") {
+      const headings = Math.min(frames,
+        TURRET_HEADINGS_BY_TYPE.get(b.t) || TURRET_HEADINGS);
+      let a = (b.simRot + 180) % 360;
+      if (a < 0) a += 360;
+      return Math.min(headings - 1, Math.floor((a / 360) * headings));
+    }
+    // During the simulated attack the sim aims each turret at ITS OWN
+    // locked target (BTOWER.Rotate points at _target, not at the cursor);
+    // towers with nothing to shoot rest, and the pointer no longer swings
+    // barrels around while a battle is on.
+    let aim = this.aimPoint;
+    if (this.simTurretMode) {
+      aim = b.simAim || null;
+    }
+    if (!aim) return 0; // untouched: rests bottom-right, as in game
     const headings = Math.min(frames, TURRET_HEADINGS_BY_TYPE.get(b.t) || TURRET_HEADINGS);
     const muzzle = YardRenderer.fromIso(b.x, b.y);
-    const target = YardRenderer.fromIso(this.aimPoint.x, this.aimPoint.y);
+    const target = YardRenderer.fromIso(aim.x, aim.y);
     let angle = Math.atan2(target.y - (muzzle.y + 35), target.x - (muzzle.x + 35)) * 57.2957795;
+    // BUILDING118 adds 30 degrees before bucketing - its sheet is drawn
+    // off-axis by that much.
+    angle += TURRET_HEADING_OFFSET.get(b.t) || 0;
     if (angle < 0) angle += 360;
+    if (angle >= 360) angle -= 360;
     return Math.min(headings - 1, Math.floor((angle / 360) * headings));
   }
 
@@ -1302,24 +1616,223 @@ export class YardRenderer {
     this.invalidate();
   }
 
+  // ── Pathing, per PATHING.as ──────────────────────────────────────────
+  // The game routes ground monsters over a cost grid built from every
+  // living building's footprint (cell = 10 cart px on a 260x260 board).
+  // This is the same idea: a boolean occupancy grid in cartesian space
+  // (cell 12px) rebuilt when the building set changes, and an 8-way A*
+  // with corner-cut prevention plus line-of-sight smoothing. Flyers and
+  // burrowers never consult it.
+  // The game's cart-space footprints (each class's _footprint rect), which
+  // are NOT the display sizes: walls are 20x20, standard buildings 70x70,
+  // the big hatcheries/bunkers 90-160. Pathing and melee contact both
+  // measure against these.
+  static PATH_FOOTPRINT = { 1:70, 2:70, 3:70, 4:70, 5:90, 6:80, 7:30, 8:100,
+    9:80, 10:100, 11:90, 12:70, 14:160, 15:160, 17:20, 18:20, 19:20,
+    20:70, 21:70, 22:90, 23:70, 24:70, 25:70, 26:70, 27:140, 51:90, 52:40,
+    112:130, 113:80, 114:160, 115:70, 117:20, 118:70, 128:160, 129:70,
+    130:70, 132:70, 136:70, 137:70, 138:70 };
+
+  static pathFootprint(t) {
+    return YardRenderer.PATH_FOOTPRINT[t] || 70;
+  }
+
+  buildBlockGrid() {
+    // PATHING.as, faithfully weighted: cell = 10 cart px, base cost 10.
+    // A living building adds +10 across its whole footprint (the fringe
+    // monsters hug) and +200 across the footprint minus a 10px border;
+    // a wall's core instead adds 100 + 25 x level - so a level-1 fence
+    // is cheap enough to chew through while a level-10 one sends the
+    // horde walking around. Crossing costs are REAL costs, not blocks:
+    // the route that crosses a wall is a route that eats it.
+    const CELL = 10;
+    const alive = (this.buildings || []).filter((b) => b.state !== "destroyed"
+      && String(this.gameData?.get?.(b.t)?.type || "") !== "decoration");
+    if (!alive.length) { this.blockGrid = null; return; }
+    let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
+    const boxes = alive.map((b) => {
+      const c = YardRenderer.fromIso(b.x, b.y);
+      const size = YardRenderer.pathFootprint(b.t);
+      const half = size / 2;
+      const isWall = String(this.gameData?.get?.(b.t)?.type || "") === "wall";
+      // BUILDING17: fringe rect extends 10px BEYOND the footprint (+20),
+      // core is the WHOLE footprint at 100 + 25 x level. Other buildings
+      // (BUILDING1 et al.): fringe = footprint (+10), core inset 10 (+200).
+      const fringePad = isWall ? -10 : 0;
+      const fringeAdd = isWall ? 20 : 10;
+      const corePad = isWall ? 0 : 10;
+      const core = isWall ? 100 + (Number(b.l) || 1) * 25 : 200;
+      const reach = half - fringePad;
+      minX = Math.min(minX, c.x - reach); maxX = Math.max(maxX, c.x + reach);
+      minY = Math.min(minY, c.y - reach); maxY = Math.max(maxY, c.y + reach);
+      return { x: c.x, y: c.y, half, core, fringePad, fringeAdd, corePad, b };
+    });
+    minX -= CELL * 8; minY -= CELL * 8; maxX += CELL * 8; maxY += CELL * 8;
+    const w = Math.min(420, Math.ceil((maxX - minX) / CELL));
+    const h = Math.min(420, Math.ceil((maxY - minY) / CELL));
+    const cost = new Uint16Array(w * h).fill(10);
+    const owner = new Array(w * h).fill(null);
+    for (const bx of boxes) {
+      const span = (pad) => ({
+        x0: Math.max(0, Math.floor((bx.x - bx.half + pad - minX) / CELL)),
+        x1: Math.min(w - 1, Math.floor((bx.x + bx.half - pad - minX) / CELL)),
+        y0: Math.max(0, Math.floor((bx.y - bx.half + pad - minY) / CELL)),
+        y1: Math.min(h - 1, Math.floor((bx.y + bx.half - pad - minY) / CELL)),
+      });
+      const fringe = span(bx.fringePad);
+      for (let gy = fringe.y0; gy <= fringe.y1; gy++) {
+        for (let gx = fringe.x0; gx <= fringe.x1; gx++) cost[gy * w + gx] += bx.fringeAdd;
+      }
+      const core = span(bx.corePad);
+      for (let gy = core.y0; gy <= core.y1; gy++) {
+        for (let gx = core.x0; gx <= core.x1; gx++) {
+          const i = gy * w + gx;
+          cost[i] += bx.core;
+          owner[i] = bx.b;
+        }
+      }
+    }
+    this.blockGrid = { CELL, minX, minY, w, h, cost, owner };
+  }
+
+  gridCost(gx, gy) {
+    const g = this.blockGrid;
+    if (!g) return 10;
+    if (gx < 0 || gy < 0 || gx >= g.w || gy >= g.h) return 10;
+    return g.cost[gy * g.w + gx];
+  }
+
+  // Cheap ground: base cost plus at most one building fringe - the strip
+  // monsters walk along a wall without paying to cross it.
+  lineFree(ax, ay, bx, by) {
+    const g = this.blockGrid;
+    if (!g) return true;
+    const steps = Math.ceil(Math.hypot(bx - ax, by - ay) / (g.CELL * 0.5)) || 1;
+    for (let i = 0; i <= steps; i++) {
+      const x = ax + (bx - ax) * (i / steps);
+      const y = ay + (by - ay) * (i / steps);
+      if (this.gridCost(Math.floor((x - g.minX) / g.CELL),
+        Math.floor((y - g.minY) / g.CELL)) > 20) return false;
+    }
+    return true;
+  }
+
+  // Weighted A* over the cost field. Returns { waypoints, chew }: the iso
+  // corners to walk, and - when the cheapest route crosses a building
+  // core - the FIRST such building, which is the wall the monster should
+  // be eating instead of ghosting through it.
+  findPath(fromIsoPt, toIsoPt) {
+    const g = this.blockGrid;
+    if (!g) return { waypoints: [], chew: null };
+    const a = YardRenderer.fromIso(fromIsoPt.x, fromIsoPt.y);
+    const b = YardRenderer.fromIso(toIsoPt.x, toIsoPt.y);
+    if (this.lineFree(a.x, a.y, b.x, b.y)) return { waypoints: [], chew: null };
+    const cellOf = (p) => ({ x: Math.floor((p.x - g.minX) / g.CELL),
+      y: Math.floor((p.y - g.minY) / g.CELL) });
+    const clamp = (c) => ({ x: Math.max(0, Math.min(g.w - 1, c.x)),
+      y: Math.max(0, Math.min(g.h - 1, c.y)) });
+    const start = clamp(cellOf(a));
+    const goal = clamp(cellOf(b));
+    const idx = (c) => c.y * g.w + c.x;
+    const open = [{ c: start, f: 0 }];
+    const came = new Map();
+    const gScore = new Map([[idx(start), 0]]);
+    const H = (c) => (Math.abs(c.x - goal.x) + Math.abs(c.y - goal.y));
+    let found = null;
+    let guard = 0;
+    while (open.length && guard++ < 30000) {
+      let bi = 0;
+      for (let i = 1; i < open.length; i++) if (open[i].f < open[bi].f) bi = i;
+      const cur = open.splice(bi, 1)[0].c;
+      if (cur.x === goal.x && cur.y === goal.y) { found = cur; break; }
+      const cg = gScore.get(idx(cur));
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = cur.x + dx;
+          const ny = cur.y + dy;
+          if (nx < 0 || ny < 0 || nx >= g.w || ny >= g.h) continue;
+          const nc = { x: nx, y: ny };
+          const stepLen = dx && dy ? 1.414 : 1;
+          // cost 10 = 1.0 per cell; a wall core is its real multiple.
+          const cost = cg + stepLen * (this.gridCost(nx, ny) / 10);
+          const key = idx(nc);
+          if (cost < (gScore.get(key) ?? Infinity)) {
+            gScore.set(key, cost);
+            came.set(key, cur);
+            open.push({ c: nc, f: cost + H(nc) });
+          }
+        }
+      }
+    }
+    if (!found) return null;
+    const cells = [found];
+    let walker = found;
+    while (came.has(idx(walker))) { walker = came.get(idx(walker)); cells.push(walker); }
+    cells.reverse();
+    // Does the cheapest route cross a building core? Then the route IS
+    // "eat that wall": hand back the first core building on the way.
+    let chew = null;
+    for (const c of cells) {
+      const own = g.owner[idx(c)];
+      if (own && own.state !== "destroyed") { chew = own; break; }
+    }
+    const pts = cells.map((c) => ({ x: g.minX + (c.x + 0.5) * g.CELL,
+      y: g.minY + (c.y + 0.5) * g.CELL }));
+    const out = [];
+    let anchor = 0;
+    for (let i = 2; i < pts.length; i++) {
+      if (!this.lineFree(pts[anchor].x, pts[anchor].y, pts[i].x, pts[i].y)) {
+        out.push(pts[i - 1]);
+        anchor = i - 1;
+      }
+    }
+    return { waypoints: out.map((pp) => YardRenderer.toIsoPoint(pp.x, pp.y)), chew };
+  }
+
   stepPens(steps) {
     for (const ent of this.penEntities) {
       for (let i = 0; i < steps; i++) {
         ent.frame++;
         const chance = ent.kind === "guardian" ? 150 : 200; // ChampionBase 1276 / tickBPen
-        if (ent.frame > 240 && Math.floor(Math.random() * chance) === 1) {
+        if (!ent.holdWander && ent.frame > 240
+          && Math.floor(Math.random() * chance) === 1) {
           ent.target = this.pointInPen(ent.home, ent.penSize, ent.penOffset);
         }
-        const dx = ent.target.x - ent.x;
-        const dy = ent.target.y - ent.y;
+        // Waypoints first (A* corners), then the final target.
+        let goal = ent.target;
+        if (Array.isArray(ent.path) && ent.path.length) {
+          goal = ent.path[0];
+          // CreepBase pops waypoints inside 10px (distanceSquared <=
+          // 100) and keeps popping in a while-loop, so a cluster of
+          // nearby corners is swallowed in one tick - smoothing turns
+          // instead of hugging every corner.
+          while (goal
+            && Math.hypot(goal.x - ent.x, goal.y - ent.y) <= 10) {
+            ent.path.shift();
+            goal = ent.path[0] || null;
+          }
+          goal = goal || ent.target;
+        }
+        const dx = goal.x - ent.x;
+        const dy = goal.y - ent.y;
         const dist = Math.hypot(dx, dy);
-        // CreepBase/ChampionBase: _speed = moveSpeed * 0.5, halved again for
-        // pen behaviour. Champions differ in that ChampionBase derives
-        // moveSpeed as (guardian speed / 2) first, so they end up at an
-        // eighth of their stat rather than a quarter.
-        const base = ent.kind === "guardian" ? ent.speed * 0.5 : ent.speed;
-        const speed = base * 0.5 * 0.5;
-        if (dist > Math.max(1, speed)) {
+        // The speed stat is HALVED at stat load for creeps and champions
+        // alike (CreepBase SetStats: value = GetProperty("speed") / 2;
+        // ChampionBase: guardian speed / 2), then move() halves again:
+        // battle displacement = stat x 0.25 per 80/s tick = stat x 20
+        // px/s, pens x0.5 more (x10 px/s), DEFEND x1.5 (x30 px/s).
+        const base = ent.speed * 0.5;
+        const inBattle = ent.flung || ent.defender;
+        // k_sBHVR_DEFEND: both CreepBase.move and ChampionBase.move apply
+        // a further 1.5x while defending, so bunker monsters and defending
+        // champions close on attackers half again faster than the horde.
+        const defendMult = ent.defender ? 1.5 : 1;
+        const speed = base * 0.5 * (inBattle ? 1 : 0.5) * defendMult;
+        // Final-approach stop, per move(): displacement only happens
+        // while distanceSquared > 25 - inside 5px the monster is
+        // _atTarget and holds still (no pixel-crawling onto the point).
+        if (dist > 5) {
           const angle = Math.atan2(dy, dx);
           ent.x += Math.cos(angle) * speed;
           ent.y += Math.sin(angle) * speed;
@@ -1329,10 +1842,17 @@ export class YardRenderer {
           ent.moving = false;
         }
       }
+      ent.holdWander = false;
     }
   }
 
   drawPenEntity(ent) {
+    // A burrowing monster (Wormzer, Valgos, King Wormzer) travels fully
+    // underground: renderBurrow zeroes
+    // the graphic's alpha and flags it invisible, so neither sprite nor
+    // shadow nor health bar draws - only the dirt-trail effects (painted
+    // by the battle overlay) mark the route.
+    if (ent.burrowed) return;
     // Sheets are tried best-first: a missing evolution sheet upstream falls
     // back to a neighbouring one rather than leaving the champion invisible.
     // Only a failed candidate advances to the next, so the normal case still
@@ -1371,11 +1891,190 @@ export class YardRenderer {
     const rows = Math.max(1, Math.floor(entry.img.height / Math.max(1, ch)));
     const rotation = ((Number(ent.rotation) || 0) % 360 + 360) % 360;
     const col = Math.min(cols - 1, Math.floor((rotation / 360) * cols));
-    const row = (ent.rowFn ? ent.rowFn(ent.moving, ent.frame) : 0) % rows;
+    // A flyer holds its walk/flap cycle even while hovering in place - a
+    // stage-3 Fomor's wings never stop - so "moving" counts the airborne.
+    // The row comes from SPRITES.GetSprite's table (monsterRow): idle,
+    // walk, and - while a swing is landing - the creature's own ATTACK
+    // strip (Gorgo and Drull rows 8+, Korath 8-19, Krallen 10-15).
+    const nowMs = performance.now();
+    let action = ent.action
+      || (ent.attackingUntil > nowMs ? "attack"
+        : (ent.moving || ent.flying ? "walk" : "idle"));
+    // Lab powerup visuals: a cloaked Brain fades to a shimmer, a blinking
+    // Bolt flickers between hops, a whirlwinding Bandito spins on the
+    // spot (BanditoAOEDamageSpin drives _targetRotation while brawling).
+    let labAlpha = 1;
+    // Invisibility swaps to the sheet's dedicated ghost BANK (rows +30 in
+    // game) at FULL alpha - the art is the effect. The 0.35 fade only
+    // stands in when the loaded sheet has no second bank. Blink holds the
+    // game's constant graphic.alpha = 0.3 during the hop.
+    if (ent.invisible) labAlpha = rows > 1 ? 1 : 0.35;
+    else if (ent.blinkUntil > nowMs) labAlpha = 0.3;
+    if (ent.spinUntil > nowMs) {
+      // BanditoAOEDamageSpin: _targetRotation += attackCooldown x 6 x
+      // (0.5 + 0.5 x powerLevel) per 80/s tick - a blur right after the
+      // swing that visibly winds down as the next one nears.
+      const dtMs = Math.min(100, nowMs - (ent._lastSpinAt || nowMs));
+      ent._lastSpinAt = nowMs;
+      const cdTicks = Math.max(0, ((ent.nextSwing || nowMs) - nowMs) / 12.5);
+      const mult = 0.5 + 0.5 * Math.max(1, Number(ent.abilityLevel) || 1);
+      ent.rotation = ((ent.rotation || 0)
+        + cdTicks * 6 * mult * (dtMs / 12.5)) % 360;
+    }
+    // (Burrower underground travel is handled by the ent.burrowed early
+    // return above - the game hides the sprite entirely rather than
+    // showing the dirt-mound row while moving.)
+    const row = (ent.baseId
+      ? monsterRow(ent.baseId, ent.level, action, ent.frame)
+      : (ent.rowFn ? ent.rowFn(ent.moving || Boolean(ent.flying), ent.frame) : 0)) % rows;
+    // CreepBase draws flying monsters lifted by _altitude with the shadow
+    // left on the ground; the ellipse anchors the sprite visually.
+    const alt = Number(ent.altitude) || 0;
+    // MonsterBase.jump(): surfacing from a burrow pops the sprite up
+    // ~15px and Bounce.easeOut settles it over 0.6s.
+    let lift = alt;
+    // RezghulResurrectAttack: the raised corpse tweens up 20px from the
+    // ground over 0.8s (Sine.easeOut).
+    if (ent.raisedAt && nowMs - ent.raisedAt < 800) {
+      const t = (nowMs - ent.raisedAt) / 800;
+      lift -= 20 * (1 - Math.sin(t * Math.PI / 2));
+    }
+    if (ent.surfacedAt && nowMs - ent.surfacedAt < 600) {
+      const t = (nowMs - ent.surfacedAt) / 600;
+      const bounceOut = (x) => {
+        const n1 = 7.5625;
+        const d1 = 2.75;
+        if (x < 1 / d1) return n1 * x * x;
+        if (x < 2 / d1) { x -= 1.5 / d1; return n1 * x * x + 0.75; }
+        if (x < 2.5 / d1) { x -= 2.25 / d1; return n1 * x * x + 0.9375; }
+        x -= 2.625 / d1;
+        return n1 * x * x + 0.984375;
+      };
+      lift += 15 * (1 - bounceOut(t));
+    }
+    if (alt > 0.5) {
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.22 * Math.min(1, alt / 60);
+      this.ctx.fillStyle = "#000";
+      this.ctx.beginPath();
+      this.ctx.ellipse(ent.x, ent.y, Math.floor(cw) * 0.28, ch * 0.12, 0, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.restore();
+    }
     const sx = Math.floor(cw * col);
     const sy = Math.floor(ch * row);
+    // GlowFilter stand-ins: MonsterBase.addFilter keeps a filter ARRAY on
+    // the sprite, and Flash applies the list sequentially - each
+    // GlowFilter(color, alpha, blur, blur, strength, q) is an outer glow
+    // hugging the alpha silhouette OF THE PREVIOUS STAGE'S OUTPUT. So a
+    // monster carrying both the Enrage magenta and the LootingMultiplier
+    // green shows the first glow around the sprite and the second wrapping
+    // sprite-plus-first-glow as an outer halo. That chaining is rebuilt
+    // here with two offscreen buffers: frame into A; per filter, A's glow
+    // (canvas shadows follow the silhouette; `strength` passes of the
+    // offset-shadow trick) plus A itself into B, then swap. Blitting the
+    // final buffer through the camera transform scales glow with zoom, as
+    // Flash's filters scale with the object.
+    if (Array.isArray(ent.glowFilters) && ent.glowFilters.length) {
+      const w = Math.floor(cw);
+      const pad = 8 + ent.glowFilters.reduce(
+        (sum, f) => sum + Math.ceil((f.blur || 8) * 1.5), 0);
+      const bw = w + pad * 2;
+      const bh = ch + pad * 2;
+      if (!this.glowBufA || this.glowBufA.width < bw || this.glowBufA.height < bh) {
+        this.glowBufA = document.createElement("canvas");
+        this.glowBufB = document.createElement("canvas");
+      }
+      for (const buf of [this.glowBufA, this.glowBufB]) {
+        buf.width = Math.max(buf.width, bw);
+        buf.height = Math.max(buf.height, bh);
+      }
+      let front = this.glowBufA;
+      let back = this.glowBufB;
+      let fctx = front.getContext("2d");
+      fctx.clearRect(0, 0, front.width, front.height);
+      fctx.drawImage(entry.img, sx, sy, w, ch, pad, pad, w, ch);
+      const off = 10000;
+      for (const f of ent.glowFilters) {
+        const bctx = back.getContext("2d");
+        bctx.clearRect(0, 0, back.width, back.height);
+        bctx.save();
+        bctx.shadowColor = `rgba(${f.color}, ${f.alpha})`;
+        bctx.shadowBlur = f.blur || 8;
+        bctx.shadowOffsetX = off;
+        bctx.shadowOffsetY = 0;
+        const passes = Math.max(1, f.strength || 1);
+        for (let i = 0; i < passes; i++) bctx.drawImage(front, -off, 0);
+        bctx.restore();
+        bctx.drawImage(front, 0, 0);
+        const swap = front; front = back; back = swap;
+      }
+      if (labAlpha < 1) { this.ctx.save(); this.ctx.globalAlpha = labAlpha; }
+      this.ctx.drawImage(front, 0, 0, bw, bh,
+        ent.x - mx - pad, ent.y - my - pad - lift, bw, bh);
+      if (labAlpha < 1) this.ctx.restore();
+      this.drawMonsterHealthBar(ent, ent.y - my - lift);
+      return;
+    }
+    // Zombiefy: a raised zombie desaturates to grayscale over 1s and
+    // stays gray (the game tweens colorMatrixFilter saturation to 0).
+    const zsat = ent.zombie
+      ? Math.max(0, 1 - (nowMs - (ent.raisedAt || nowMs)) / 1000) : 1;
+    if (labAlpha < 1 || zsat < 1) {
+      this.ctx.save();
+      if (labAlpha < 1) this.ctx.globalAlpha = labAlpha;
+      if (zsat < 1) this.ctx.filter = `saturate(${zsat})`;
+    }
     this.ctx.drawImage(entry.img, sx, sy, Math.floor(cw), ch,
-      ent.x - mx, ent.y - my, Math.floor(cw), ch);
+      ent.x - mx, ent.y - my - lift, Math.floor(cw), ch);
+    if (labAlpha < 1 || zsat < 1) this.ctx.restore();
+    this.drawMonsterHealthBar(ent, ent.y - my - lift);
+  }
+
+  // MonsterBase.render's health bar: shown ONLY while damaged, a 17x5
+  // slice of the embedded bmp_healthbarsmall strip (12 states, row =
+  // 11 - int(11 / maxHealth * health)) copyPixels'd INTO the sprite
+  // bitmap centred on the cell, its top 6px below the cell's top edge -
+  // so it rides a flyer's lifted graphic. The bundled asset is
+  // pixel-identical to the SWF bitmap; until it loads, a quantised
+  // colour fill stands in.
+  static hpBarStrip() {
+    if (!YardRenderer._hpBarImg) {
+      const img = new Image();
+      img.onerror = () => {
+        const tries = Number(img.dataset?.retryCount || 0);
+        if (tries >= 4) return;
+        if (img.dataset) img.dataset.retryCount = String(tries + 1);
+        window.setTimeout(() => {
+          img.src = `/assets/gameui/attack/healthbar_small.png?retry=${tries + 1}`;
+        }, 5000);
+      };
+      img.src = "/assets/gameui/attack/healthbar_small.png";
+      YardRenderer._hpBarImg = img;
+    }
+    return YardRenderer._hpBarImg;
+  }
+
+  drawMonsterHealthBar(ent, spriteTopY) {
+    if (!(ent.flung || ent.defender)) return;
+    if (!(ent.maxHp > 0) || !(ent.hp < ent.maxHp)) return;
+    const row = Math.min(11, Math.max(0,
+      11 - Math.floor((11 / ent.maxHp) * Math.max(0, ent.hp))));
+    const barX = ent.x - 8.5;
+    const barY = spriteTopY + 6;
+    const { ctx } = this;
+    const strip = YardRenderer.hpBarStrip();
+    if (strip.complete && strip.naturalWidth) {
+      ctx.drawImage(strip, 0, row * 5, 17, 5, barX, barY, 17, 5);
+      return;
+    }
+    const frac = (11 - row) / 11;
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.75)";
+    ctx.fillRect(barX, barY, 17, 5);
+    ctx.fillStyle = frac > 0.5 ? "#39d353" : frac > 0.25 ? "#e8c229" : "#e0442e";
+    ctx.fillRect(barX + 1, barY + 1, 15 * frac, 3);
+    ctx.restore();
   }
 
   drawChampion(champ) {

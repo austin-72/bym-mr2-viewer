@@ -61,7 +61,12 @@ body {
 #app {
   position: relative;
   width: 100vw;
+  /* vh first as a fallback: browsers without dvh support (iOS < 15.4,
+     Chrome < 108) drop the dvh declarations as invalid, and with no height
+     at all the flex column collapsed to a blank page. */
+  height: 100vh;
   height: 100dvh;
+  min-height: 100vh;
   min-height: 100dvh;
 }
 
@@ -342,6 +347,123 @@ body {
 .game-frame.frame-mr2 > .frame-button-alt {
   top: calc(-7px * var(--fs));
   right: calc(23px * var(--fs));
+}
+
+/* ── Inferno popup frame (frame3) ───────────────────────────────────────
+   popup_infernoentice_CLIP's mcFrame is frame3_CLIP. frame3.Setup, verbatim:
+
+     topLeft      (x - 31,      y - 18)         116 x 90
+     topRight     (x + w - 80,  y - 18)
+     bottomLeft   (x - 31,      y + h - 49)
+     bottomRight  (x + w - 80,  y + h - 49)
+     fillerTop    (x + 56, y - 7)      width  = w - 105
+     fillerBottom (x + 40, y + h - 11) width  = w - 90
+     fillerLeft   (x - 8,  y + 50)     height = h - 80
+     fillerRight  (x + w - 16, y + 50) height = h - 95
+     background   (x + 10, y + 10)     w - 20 by h - 20
+     buttonClose  (x + w - 32, y - 5)
+
+   Unlike frame1 and frame2 this one ships its own background bitmap, so the
+   panel fill is the client's rather than a flat colour. */
+.game-frame.frame-inferno::before {
+  inset: calc(-18px * var(--fs)) calc(-36px * var(--fs))
+         calc(-41px * var(--fs)) calc(-31px * var(--fs));
+  background-image:
+    url("/assets/ui/frame3/top_right.png"),
+    url("/assets/ui/frame3/top_left.png"),
+    url("/assets/ui/frame3/bottom_right.png"),
+    url("/assets/ui/frame3/bottom_left.png"),
+    url("/assets/ui/frame3/filler_bottom.png"),
+    url("/assets/ui/frame3/filler_right.png"),
+    url("/assets/ui/frame3/filler_left.png"),
+    url("/assets/ui/frame3/filler_top.png"),
+    url("/assets/ui/frame3/background.jpg");
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat,
+                     repeat-x, repeat-y, repeat-y, repeat-x, repeat;
+  background-position:
+    right 0 top 0,
+    left 0 top 0,
+    right 0 bottom 0,
+    left 0 bottom 0,
+    left calc(71px * var(--fs)) bottom calc(13px * var(--fs)),
+    right calc(52px * var(--fs)) top calc(68px * var(--fs)),
+    left calc(23px * var(--fs)) top calc(68px * var(--fs)),
+    left calc(87px * var(--fs)) top calc(11px * var(--fs)),
+    left calc(41px * var(--fs)) top calc(28px * var(--fs));
+  background-size:
+    calc(116px * var(--fs)) calc(90px * var(--fs)),
+    calc(116px * var(--fs)) calc(90px * var(--fs)),
+    calc(116px * var(--fs)) calc(90px * var(--fs)),
+    calc(116px * var(--fs)) calc(90px * var(--fs)),
+    calc(100% - 157px * var(--fs)) calc(39px * var(--fs)),
+    calc(28px * var(--fs)) calc(100% - 154px * var(--fs)),
+    calc(24px * var(--fs)) calc(100% - 139px * var(--fs)),
+    calc(100% - 172px * var(--fs)) calc(29px * var(--fs)),
+    calc(100% - 87px * var(--fs)) calc(100% - 79px * var(--fs));
+}
+
+.game-frame.frame-inferno > .frame-button-close {
+  top: calc(-5px * var(--fs));
+  right: calc(5px * var(--fs));
+}
+
+/* ── Inferno Cavern popup ─────────────────────────────────────────────── */
+.inferno-popup {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 8;
+  width: min(520px, calc(100% - 120px));
+  padding: 16px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  pointer-events: auto;
+  color: #f3e6cf;
+}
+
+.inferno-title {
+  /* entercavern_direct_popup_title. The clip has a title; the first rebuild
+     omitted it, so the popup opened with artwork flush against the top rail. */
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  color: #ffd9a0;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
+}
+
+.inferno-art {
+  /* shapes/1267 from popup_infernoentice_CLIP, 491x401, scaled to fit.
+
+     frame3's corner ornaments are 116x90 and sit at the ::before corners,
+     which reach 85px into the popup box horizontally (116 - 31 left inset,
+     116 - 36 right). The panel's own padding is only 24px, so a 420px-wide
+     opaque bitmap painted over 35x56px of the left ornament and 30x56px of
+     the right one - the artwork hid the frame it is supposed to sit inside.
+     Text may overlap the corners (the game's own popups do that), but an
+     opaque image must not, so the art is held to the clear channel between
+     them: popup width - 2 x 85, less the 24px padding already applied on
+     each side, i.e. 100% - 122px. */
+  display: block;
+  width: 100%;
+  max-width: min(420px, calc(100% - 122px));
+  height: auto;
+}
+
+.inferno-desc {
+  margin: 0;
+  max-width: 44ch;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #e8d6b8;
+}
+
+.inferno-actions {
+  margin-top: 4px;
 }
 
 .game-frame {
@@ -814,6 +936,62 @@ h2 {
   max-height: min(32vh, 320px);
 }
 
+/* Selected players render as removable chips under the picker input. */
+.filter-player-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.filter-player-list[hidden] {
+  display: none;
+}
+
+.filter-player-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(242, 199, 107, 0.35);
+  background: rgba(242, 199, 107, 0.12);
+  color: #f5dda6;
+  font-size: 12.5px;
+  max-width: 100%;
+}
+
+.filter-player-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.filter-player-chip-remove {
+  appearance: none;
+  border: 0;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.filter-player-chip-remove:hover:not(:disabled) {
+  background: rgba(255, 92, 74, 0.35);
+  color: #ffd9d2;
+}
+
 .filter-help {
   margin: 8px 0 0;
   color: var(--muted);
@@ -823,8 +1001,11 @@ h2 {
 
 .filter-options {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  /* Cell type and Outpost type each fit their chips on a single line;
+     overflow-x is a safety valve for very narrow panels. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 6px;
 }
 
 .filter-level-range {
@@ -2034,11 +2215,6 @@ h2 {
                 visibility 0s;
   }
 
-  #app.mobile-details-open #find-home-button {
-    opacity: 0;
-    pointer-events: none;
-    transform: translateY(12px) scale(0.92);
-  }
 
   #zoom-out-button,
   #zoom-in-button {
@@ -2194,16 +2370,31 @@ h2 {
   color: #ff5c4a;
 }
 
-/* --- Measure tool --- */
-.measure-button {
-  margin-top: 10px;
-  width: 100%;
+/* --- Measure tool ---
+   The button lives in the main toolbar now (a plain .tb-button whose active
+   state uses the shared stone hover art); the status line is a pill floating
+   over the map, styled to match .map-coordinates but centred at the top so
+   it never collides with the coordinates readout or the corner buttons. */
+.measure-pill {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 36px);
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: rgba(14, 12, 10, 0.86);
+  border: 1px solid rgba(255, 170, 60, 0.45);
+  color: #ffd9a0;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  text-align: center;
+  z-index: 5;
+  pointer-events: none;
 }
 
-.measure-button.active {
-  border-color: rgba(255, 170, 60, 0.8);
-  color: #ffd9a0;
-  background: rgba(255, 170, 60, 0.12);
+.measure-pill[hidden] {
+  display: none;
 }
 
 /* --- World scan --- */
@@ -2280,6 +2471,202 @@ h2 {
   margin-top: 4px;
   display: grid;
   gap: 4px;
+}
+
+/* Account menu: Password | Passwordless mode toggle + token-login steps. */
+.login-mode-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 10px;
+}
+
+.login-mode-tab {
+  appearance: none;
+  flex: 1 1 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 6px 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.login-mode-tab:hover {
+  border-color: rgba(242, 199, 107, 0.4);
+  color: var(--text);
+}
+
+.login-mode-tab.active {
+  border-color: rgba(242, 199, 107, 0.6);
+  background: rgba(242, 199, 107, 0.16);
+  color: #f5dda6;
+}
+
+.login-mode-panel[hidden] {
+  display: none;
+}
+
+.token-login-steps {
+  margin: 10px 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.token-login-steps li {
+  line-height: 1.4;
+}
+
+.token-copy-script {
+  margin-left: 6px;
+  padding: 3px 10px;
+  min-height: 0;
+  font-size: 12px;
+  vertical-align: middle;
+}
+
+#token-login-panel > input {
+  width: 100%;
+  margin: 4px 0 8px;
+}
+
+#token-login-panel > .primary-button {
+  width: 100%;
+}
+
+.token-login-note {
+  margin-top: 10px;
+}
+
+/* Keepalive / live-check problems surface here instead of as a full-screen
+   overlay; amber so it reads as a warning, not body copy. */
+.activity-status {
+  color: #ffc46b;
+}
+
+/* Activity scope tabs (Me | Allies | Enemies | Server | Global). */
+.activity-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.activity-tab {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 11px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.activity-tab:hover {
+  border-color: rgba(242, 199, 107, 0.4);
+  color: var(--text);
+}
+
+.activity-tab.active {
+  border-color: rgba(242, 199, 107, 0.6);
+  background: rgba(242, 199, 107, 0.16);
+  color: #f5dda6;
+}
+
+/* World tag on Global-tab rows. */
+.watch-world {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.activity-list {
+  margin-top: 8px;
+}
+
+/* Tall menus (leaderboard) run to the bottom edge; square off the bottom
+   corners so the flush edge reads as intentional. The height itself comes
+   from positionToolbarDropdown on desktop and the pinned bottom on mobile. */
+.tb-menu-tall {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* Toolbar leaderboard menu.
+
+   The list used to carry its own max-height: min(34vh, 360px) with the
+   scrollbar hidden - inside the full-height menu that read as the board
+   simply being cut off partway down entry #7. The menu is a fixed-height
+   flex column now: the list fills all remaining height, scrolls on its own,
+   and shows a thin scrollbar so the overflow is visible.
+
+   Wider than a standard dropdown because the rows carry the four kit
+   columns; the mobile sheet rule (higher specificity) still wins on phones,
+   where the rows scroll horizontally instead. */
+#menu-leaderboard {
+  width: min(640px, 94vw);
+}
+
+/* Flex only while open: an unconditional display on the id out-specifies
+   the base ".tb-menu { display: none }", which left this menu permanently
+   visible and immune to collapsing. */
+#menu-leaderboard.open {
+  display: flex;
+  flex-direction: column;
+}
+
+#menu-leaderboard .leaderboard-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  scrollbar-width: thin;
+  padding-right: 6px;
+}
+
+#menu-leaderboard .leaderboard-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+#menu-leaderboard .leaderboard-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+/* rank | jump | name | outposts | no kit | regular | mega | ultra */
+#menu-leaderboard .leaderboard-row {
+  grid-template-columns: 28px 30px minmax(0, 1fr) 68px 52px 60px 46px 46px;
+  gap: 8px;
+}
+
+.leaderboard-kit {
+  color: var(--muted);
+}
+
+.leaderboard-header .leaderboard-kit {
+  color: inherit;
+}
+
+@media (max-width: 900px) {
+  /* Eight columns cannot fit a phone width: the rows keep their layout and
+     the list pans sideways instead, with the sticky header riding along. */
+  #menu-leaderboard .leaderboard-list {
+    overflow-x: auto;
+  }
+
+  #menu-leaderboard .leaderboard-row {
+    min-width: 560px;
+  }
 }
 
 .watch-empty {
@@ -2403,6 +2790,7 @@ h2 {
 #app {
   display: flex;
   flex-direction: column;
+  height: 100vh; /* fallback for browsers without dvh */
   height: 100dvh;
   overflow: hidden;
 }
@@ -2526,6 +2914,9 @@ h2 {
   padding: 7px 12px;
   cursor: pointer;
   white-space: nowrap;
+  /* iOS ignores user-scalable=no; without this, a quick second tap on any
+     toolbar button double-tap-zoomed the page. */
+  touch-action: manipulation;
   transition: filter 110ms ease;
 }
 
@@ -2600,15 +2991,27 @@ h2 {
   display: block;
 }
 
+/* While open, menus are portaled out of their .tb-item to the toolbar
+   element (WebKit paints position:fixed descendants of an overflow scroller
+   behind the composited map canvas on iPhones), so the open state has to be
+   carried by a class on the menu itself, not by its ancestry. */
+.tb-menu.open {
+  display: block;
+}
+
 /* .tb-menu-right alignment is handled in JS (right edge under the button). */
 
 /* Search menu: results flow in the menu itself so there is one large scroll
    area instead of a nested dropdown trapped in a small box. */
-.map-search-panel > .tb-menu {
+/* A single class, not ".map-search-panel > .tb-menu": (a) the menu leaves
+   the panel while open (portaled to the toolbar), and (b) the old two-class
+   selector out-specified the mobile ".tb-menu" full-width sheet rule, which
+   pinned the search sheet at 380px on phones narrower than that. */
+.tb-menu-search {
   width: 380px;
 }
 
-.map-search-panel .search-results {
+.tb-menu-search .search-results {
   position: static;
   top: auto;
   left: auto;
@@ -2819,7 +3222,11 @@ h2 {
 /* Mobile: toolbar scrolls horizontally; menus become full-width sheets */
 @media (max-width: 900px) {
   .toolbar {
-    padding: 6px;
+    /* viewport-fit=cover extends the page under the notch, status bar and
+       rounded corners; without these insets the first toolbar buttons sat
+       under the iPhone status bar in portrait and under the notch in
+       landscape. */
+    padding: calc(6px + env(safe-area-inset-top, 0px)) calc(6px + env(safe-area-inset-right, 0px)) 6px calc(6px + env(safe-area-inset-left, 0px));
     gap: 6px;
   }
 
@@ -2827,14 +3234,29 @@ h2 {
     display: none;
   }
 
-  .tb-menu,
-  .toolbar .filter-menu {
+  /* The :is() wrapper lifts specificity to id level so the sheet layout
+     also beats the desktop-sized #menu-alliance (580px wide, 90vh tall)
+     and #menu-loot (220px) rules; before this, those two menus kept their
+     desktop dimensions on phones, with the alliance menu's bottom running
+     off-screen on short viewports. */
+  :is(#toolbar, #app) .tb-menu,
+  :is(#toolbar, #app) .filter-menu {
     position: fixed;
-    top: 58px;
-    left: 8px;
-    right: 8px;
+    /* Under the notch/status bar with viewport-fit=cover. */
+    top: calc(58px + env(safe-area-inset-top, 0px));
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
     width: auto;
-    max-height: calc(100dvh - 74px);
+    max-height: calc(100vh - 74px);
+    max-height: calc(100dvh - 74px - env(safe-area-inset-top, 0px));
+  }
+
+  /* Tall menus stretch to the bottom of the screen on phones too: pinning
+     both edges and releasing max-height lets top+bottom set the height. */
+  :is(#toolbar, #app) .tb-menu-tall {
+    bottom: env(safe-area-inset-bottom, 0px);
+    height: auto;
+    max-height: none;
   }
 
   .map-panel .details-panel,
@@ -2897,10 +3319,16 @@ h2 {
     min-height: 40px;
   }
 
-  /* iOS zooms the page when focusing an input below 16px. */
+  /* iOS zooms the page when focusing an input below 16px. Textareas too:
+     the help panel's hide-request box and the alliance chat composer
+     triggered the same focus zoom. */
   .tb-menu input,
+  .tb-menu textarea,
   .toolbar .filter-menu input,
-  .toolbar input {
+  .toolbar input,
+  .toolbar textarea,
+  .help-panel textarea,
+  .help-panel input {
     font-size: 16px;
   }
 }
@@ -2942,8 +3370,9 @@ h2 {
 /* Bottom-right corner buttons (help for everyone, settings for admins). */
 .corner-buttons {
   position: fixed;
-  right: 14px;
-  bottom: 14px;
+  /* Clear the home indicator and rounded corners under viewport-fit=cover. */
+  right: calc(14px + env(safe-area-inset-right, 0px));
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2955,6 +3384,7 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  touch-action: manipulation;
   width: 34px;
   height: 34px;
   border-radius: 50%;
@@ -2982,6 +3412,21 @@ h2 {
   background: rgba(58, 45, 30, 0.95);
 }
 
+/* Touch: 34px is well under the ~44px minimum touch target for the only
+   zoom control phones have (no scroll wheel). Placed after the base rule -
+   equal specificity, so source order decides. */
+@media (pointer: coarse) {
+  .corner-buttons {
+    gap: 10px;
+  }
+
+  .corner-button {
+    width: 44px;
+    height: 44px;
+    font-size: 19px;
+  }
+}
+
 .help-panel {
   position: fixed;
   inset: 0;
@@ -2992,52 +3437,63 @@ h2 {
   background: rgba(10, 7, 5, 0.6);
 }
 
-.help-panel-inner {
-  width: min(640px, 92vw);
+/* The frame draws its own parchment; .help-frame only sizes and arranges.
+   Same recipe as the account modal: panel + game-frame + a white card. */
+.help-frame {
+  position: relative;
+  width: min(520px, calc(100vw - 80px));
   max-height: min(84vh, 780px);
   display: flex;
   flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--panel-strong);
-  border-radius: 12px;
-  box-shadow: 0 10px 40px var(--shadow);
+  padding: 18px 16px 14px;
 }
 
-.help-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px 8px;
-}
-
-.help-panel-header h2 {
-  margin: 0;
-}
-
-.help-panel-body {
-  padding: 0 18px 18px;
+.help-card {
+  text-align: left;
   overflow-y: auto;
+  min-height: 0;
   font-size: 13px;
   line-height: 1.55;
+  color: #222;
 }
 
-.help-panel-body h3 {
-  color: var(--accent);
+.help-card h3 {
+  color: #111;
   margin: 14px 0 4px;
-  font-size: 13px;
+  font: 700 12.5px Verdana, sans-serif;
 }
 
-.help-panel-body p {
+.help-card h3:first-child {
+  margin-top: 0;
+}
+
+.help-card p {
   margin: 4px 0;
-  color: var(--text);
+  color: #222;
+}
+
+.help-card .muted {
+  color: #666;
+}
+
+@media (max-width: 700px) {
+  /* Full-size frame corners are 134px - 38% of a 390px phone - so the frame
+     shrinks like the base view window does. */
+  .help-frame {
+    --fs: 0.6;
+    width: calc(100vw - 60px);
+    max-height: calc(100dvh - 80px);
+  }
 }
 
 #hide-request-reason {
   width: 100%;
   margin: 6px 0;
   padding: 8px;
-  border-radius: 8px;
-  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  background: #fff;
+  color: #222;
   background: rgba(20, 15, 11, 0.7);
   color: var(--text);
   font: inherit;
@@ -3838,8 +4294,15 @@ select option {
 .hud-base-head,
 .hud-base-item {
   display: grid;
-  grid-template-columns: 1fr 130px 92px;
-  gap: 12px;
+  /* Fixed widths on the first two columns, not `1fr` on the first.
+     The header and each row are SEPARATE grids, so any content-based sizing
+     resolves independently and the columns drift apart. The old `1fr` also
+     pushed Coordinates far to the right, leaving a wide empty gutter after
+     the yard type. The slack now sits in the Kit column, at the end.
+     96px fits "Inferno Yard"; 116px fits the "COORDINATES" header, which is
+     wider than any value it labels. */
+  grid-template-columns: 96px 116px 1fr;
+  gap: 8px;
   align-items: baseline;
   padding: 7px 12px;
   text-align: left;
@@ -3847,6 +4310,10 @@ select option {
 
 .hud-base-head {
   flex: none;
+  /* The rows live inside .hud-base-list, which adds 4px of its own padding,
+     so a header at 12px sat 4px left of every value under it. */
+  padding-left: 16px;
+  padding-right: 16px;
   border-bottom: 1px solid rgba(242, 199, 107, 0.25);
   color: #c7bda7;
   font: 700 10.5px/1.3 var(--font-ui);
@@ -4002,7 +4469,477 @@ select option {
 
 @media (max-width: 860px), (pointer: coarse) {
   .base-view-hud { transform: scale(0.8); }
+  .base-view-visitor-bar { transform: scale(0.8); }
 }
+
+/* ── Visitor action bar: UI_VISITOR (symbol 530) ────────────────────────
+   mcBG is shape 526 (attack/visitor_bg.png), a dark translucent rounded
+   plate the game stretches to fit - single-button states set
+   mcBG.width = 100, and the shape's 92px height lands at 51.1 through the
+   0.5554 Y placement scale. The Button sits at (10, 10) scaled 1.2307739
+   -> 81.2 x 31. Resize() pins the whole clip to the bottom-right corner. */
+.base-view-visitor-bar {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 4;
+  /* Two buttons now (Attack + Screenshot): the plate auto-sizes like the
+     game's multi-button visitor states set mcBG.width per state. */
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: 100px;
+  height: 51px;
+  /* border-image slices the rounded shape so width 100 doesn't distort the
+     corners any worse than the game's own scale-stretch does. */
+  border-style: solid;
+  border-width: 8px;
+  border-image: url("/assets/gameui/attack/visitor_bg.png") 16 fill / 8px stretch;
+  transform-origin: bottom right;
+}
+
+/* Button (sprite 13): frames 1 up / 2 over / 3 disabled, Verdana 9 bold
+   #333333 centred (Button.as builds exactly that TextFormat). The art is
+   66x31 with FFDec's 1px pad; instances size themselves by placement scale,
+   so width comes from each use and the art stretches with it as scaleX did. */
+.game-button {
+  appearance: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  height: 31px;
+  padding: 0 2px 2px;
+  border: 0;
+  border-radius: 0;
+  background: url("/assets/gameui/attack/btn_up.png") center / 100% 100% no-repeat;
+  color: #333;
+  font: 700 9px/1 Verdana, sans-serif;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.game-button:hover:not([aria-disabled="true"]),
+.game-button:focus-visible:not([aria-disabled="true"]) {
+  background-image: url("/assets/gameui/attack/btn_over.png");
+}
+
+.game-button[aria-disabled="true"] {
+  cursor: default;
+  background-image: url("/assets/gameui/attack/btn_disabled.png");
+  color: rgba(51, 51, 51, 0.5); /* Button sets _txt.alpha = 0.5 */
+}
+
+.visitor-action {
+  /* Was pinned absolute at the game's (10, 10); now a flex child so it
+     lines up beside the Screenshot button on the auto-sized plate. */
+  position: static;
+  flex: 0 0 auto;
+  width: 81px;
+}
+.visitor-screenshot {
+  flex: 0 0 auto;
+  width: 81px;
+}
+
+/* ── GLOBAL.Message stand-in ──────────────────────────────────────────── */
+.base-view-message {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  max-width: min(80%, 560px);
+  text-align: center;
+  pointer-events: none;
+  font: 700 16px/1.3 var(--font-display);
+  color: #ffe45c;
+  text-shadow:
+    1.50px 0.00px 0 #000, 1.30px 0.75px 0 #000, 0.75px 1.30px 0 #000,
+    0.00px 1.50px 0 #000, -0.75px 1.30px 0 #000, -1.30px 0.75px 0 #000,
+    -1.50px 0.00px 0 #000, -1.30px -0.75px 0 #000, -0.75px -1.30px 0 #000,
+    -0.00px -1.50px 0 #000, 0.75px -1.30px 0 #000, 1.30px -0.75px 0 #000;
+  opacity: 0;
+  transition: opacity 240ms ease;
+}
+
+.base-view-message.visible { opacity: 1; }
+
+/* ── Simulated attack mode: WMATTACK top UI ─────────────────────────────
+   All geometry is the SWF's own. The HUD anchor sits at (10, 8); children
+   below are placed exactly where UI_TOP places theirs. */
+.base-view-hud.attack-mode { pointer-events: none; }
+
+/* flingerLevel (symbol 2160) at y = 3*60 = 180, anchored at the clip's own
+   origin so every SWF child coordinate applies unchanged. The inner _mc is
+   nudged (2, -6): the top panel (shape 2150, 200x28) draws from (2, -6);
+   the creature mask and rows start at y 22.
+   Inside _txtContainer (at _mc 3.5, 3 -> clip 5.5, -3): shape 570 - the RED
+   capacity strip, 100x18 scaled 1.9205 x 1.1943 -> 192.05 x 21.5 - sits at
+   depth 1, and mcBar (shape 2154, the dull 167px cover) rides OVER it at
+   depth 2, growing with used/capacity so the red visibly drains as the
+   flinger loads. Texts at depths 5-6 paint above both. */
+.atk-flinger {
+  position: absolute;
+  left: 0;
+  top: 180px;
+  width: 205px;
+  pointer-events: auto;
+}
+
+.atk-flinger-top {
+  position: absolute;
+  left: 2px;
+  top: -6px;
+  width: 200px;
+  height: 28px;
+  background: url("/assets/gameui/attack/flinger_top.png") 0 0 / 200px 28px no-repeat;
+}
+
+/* depth 1: the red strip (shape 570). */
+.atk-flinger-top::before {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 3px;
+  width: 192.05px;
+  height: 21.5px;
+  background: url("/assets/gameui/attack/flinger_strip.png") 0 0 / 100% 100% no-repeat;
+}
+
+/* depth 2: mcBar (shape 2154) covering the red from the left as usage
+   grows. scaleX acts on its natural 167px, so 100% stops 25px short of the
+   strip's right edge - exactly the sliver the game leaves. */
+.atk-flinger-fill {
+  position: absolute;
+  left: 3.5px;
+  top: 3px;
+  width: 0;
+  height: 21.5px;
+  max-width: 167px;
+  background: url("/assets/gameui/attack/flinger_bar.png") 0 0 / 167px 21.5px no-repeat;
+}
+
+.atk-flinger-label {
+  position: absolute;
+  left: 12px;
+  top: 6.9px;
+  width: 116.5px;
+  font: 700 10px/14px Verdana, sans-serif;
+  color: #000;
+  white-space: nowrap;
+  /* The SWF text carries a white GlowFilter so the black label stays
+     readable over the red strip - the same offset-copy ring the HUD uses
+     for its black glow, in white. */
+  text-shadow:
+    1.00px 0.00px 0 #fff, 0.71px 0.71px 0 #fff, 0.00px 1.00px 0 #fff,
+    -0.71px 0.71px 0 #fff, -1.00px 0.00px 0 #fff, -0.71px -0.71px 0 #fff,
+    0.00px -1.00px 0 #fff, 0.71px -0.71px 0 #fff;
+}
+
+/* tA at _txtContainer (127.95, 3.9), a 30px field. */
+.atk-flinger-percent {
+  position: absolute;
+  left: 131.45px;
+  top: 6.9px;
+  width: 30px;
+  font: 700 10px/14px Verdana, sans-serif;
+  color: #000;
+  text-shadow:
+    1.00px 0.00px 0 #fff, 0.71px 0.71px 0 #fff, 0.00px 1.00px 0 #fff,
+    -0.71px 0.71px 0 #fff, -1.00px 0.00px 0 #fff, -0.71px -0.71px 0 #fff,
+    0.00px -1.00px 0 #fff, 0.71px -0.71px 0 #fff;
+}
+
+/* The list mask: 200 wide from clip y 22 down, rows at x 3 (bg of a button
+   placed at x 14), ScrollSetV alongside -> native thin scrollbar. The
+   height cap follows the window as the screen-height mask did, and
+   _bottomBar (shape 2152, 200x8) flows right under whatever shows. */
+.atk-scrollwrap {
+  position: absolute;
+  left: 0;
+  top: 22px;
+  width: 205px;
+}
+
+.atk-list {
+  position: relative;
+  width: 205px;
+  max-height: min(calc(var(--atk-rows) * 53px + 1px), 45vh);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.atk-list-inner {
+  position: relative;
+  width: 203px;
+}
+
+.atk-bottom {
+  width: 200px;
+  height: 8px;
+  margin-left: 2px;
+  background: url("/assets/gameui/attack/flinger_bottom.png") 0 0 / 200px 8px no-repeat;
+}
+
+/* CREATUREBUTTON_CLIP (2102) / GUARDIANBUTTON_CLIP (2140). The row origin
+   here is _bg's top-left; SWF children sit at (child + 11, child + 12).
+   _bg: shapes 2095-2098 at 2.3530731 x 0.59954834 -> 200.01 x 53.96,
+   frames bg1/bg2 alternating and full1/full2 once the stock is spent. */
+.atk-row {
+  position: absolute;
+  left: 3px;
+  width: 200px;
+  height: 53.96px;
+  background: url("/assets/gameui/attack/row_bg1.png") 0 0 / 200px 53.96px no-repeat;
+  pointer-events: auto;
+}
+
+.atk-row.alt {
+  background-image: url("/assets/gameui/attack/row_bg2.png");
+}
+
+.atk-row.depleted {
+  background-image: url("/assets/gameui/attack/row_full1.png");
+}
+
+.atk-row.alt.depleted {
+  background-image: url("/assets/gameui/attack/row_full2.png");
+}
+
+/* _creatureImage at (-5.25, -4.25) -> (5.75, 7.75); the -small.png icons
+   land at their natural 40px. GUARDIANBUTTON's mcImage sits flush at
+   (-11, -12) -> (0, 0) instead. */
+.atk-row-icon {
+  position: absolute;
+  left: 5.75px;
+  top: 7.75px;
+  width: 40px;
+  height: 40px;
+  background: center / contain no-repeat;
+}
+
+.atk-row-icon.flush {
+  left: 0;
+  top: 0;
+  width: 44px;
+  height: 44px;
+}
+
+/* txtName at (42, -6) -> (53, 6): Groboldov 12 white bold. The SWF field is
+   121.75 wide; CREATUREBUTTON shrinks the font for long names, which the
+   ellipsis stands in for. */
+.atk-row-name {
+  position: absolute;
+  left: 53px;
+  top: 6px;
+  width: 122px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 12px/1.1 var(--font-display);
+  color: #fff;
+}
+
+/* txtNumber at (112, 17) -> (123, 29), the attack-mode position (x 110 in
+   the SWF text field's own frame, txtNumber.x = 110 with buttons showing). */
+.atk-row-count {
+  position: absolute;
+  left: 123px;
+  top: 29px;
+  width: 71px;
+  font: 700 11px/1 Verdana, sans-serif;
+  color: #fff;   /* white with the black outline ring; the loaded count
+                    still flips red via .atk-loaded */
+  white-space: nowrap;
+}
+
+/* CREATUREBUTTON.Update paints the loaded half of the count red. */
+.atk-loaded { color: #f00; }
+
+/* bLess at (39.5, 8) -> (50.5, 20) and bMore at (74.75, 8) -> (85.75, 20),
+   Button scaled 0.4614 -> 30.5 wide. Champions: bSend (40.5, 8) ->
+   (51.5, 20) at 0.9228 -> 60.9, bRetreat (103.4, 8) -> (114.4, 20). */
+.atk-less { position: absolute; left: 50.5px; top: 20px; }
+.atk-more { position: absolute; left: 85.75px; top: 20px; }
+
+/* ── CATAPULTPOPUP (350, 20) + SIEGEWEAPONPOPUP (442, 20) ───────────────
+   The collapsed buttons: shape 1733 (99x99 dark plate), a 60x60 URL-loaded
+   image at (20.55, 9), Groboldov 12 white label near the bottom. Catapult's
+   _imageContainer resolves to hud (2, 72); siege's _iconbg to (103.45, 72). */
+.atk-catapult { position: absolute; left: 2px; top: 72px; pointer-events: auto; }
+.atk-siege    { position: absolute; left: 103.45px; top: 72px; pointer-events: auto; }
+
+.atk-iconbtn {
+  appearance: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  position: relative;
+  display: block;
+  width: 99px;
+  height: 99px;
+  padding: 0;
+  border: 0;
+  background: url("/assets/gameui/attack/iconbg.png") 0 0 / 99px 99px no-repeat;
+}
+
+.atk-iconbtn:hover .atk-icon-image,
+.atk-iconbtn:focus-visible .atk-icon-image {
+  filter: brightness(1.12);
+}
+
+.atk-icon-image {
+  position: absolute;
+  left: 20.55px;
+  top: 9px;
+  width: 60px;
+  height: 60px;
+  background: center / contain no-repeat;
+}
+
+/* Catapult txtName at (17.65, 78.45) w 65.35; siege txtName at rel
+   (16.8, 71) w 67.5, two lines tall in the SWF. One rule serves both. */
+.atk-icon-label {
+  position: absolute;
+  left: 16.8px;
+  bottom: 4px;
+  width: 67.5px;
+  text-align: center;
+  font: 700 12px/1.05 var(--font-display);
+  color: #fff;
+  text-shadow:
+    1.50px 0.00px 0 #000, 1.30px 0.75px 0 #000, 0.75px 1.30px 0 #000,
+    0.00px 1.50px 0 #000, -0.75px 1.30px 0 #000, -1.30px 0.75px 0 #000,
+    -1.50px 0.00px 0 #000, -1.30px -0.75px 0 #000, -0.75px -1.30px 0 #000,
+    -0.00px -1.50px 0 #000, 0.75px -1.30px 0 #000, 1.30px -0.75px 0 #000;
+}
+
+/* downBomb: "<font color=#FF0000>Cancel</font>". */
+.atk-icon-label.armed { color: #f00; }
+
+/* The opened bomb panel. _mc sits at popup (-364.5, 63.3) -> hud (-14.5,
+   83.3); its _bg (shape 1736 scaled 0.9907 x 2.3637) covers (104.1, 62.85)
+   to (432.9, 367.7) in hud space. The panel element is anchored at _mc's
+   origin so the SWF's own child coordinates apply unchanged: slots at
+   (bomb.x, bomb.y), group titles right-aligned above each row. */
+.atk-catapult-panel {
+  /* _mc sits at popup (-364.5, 63.3) -> hud (-14.5, 83.3); this element IS
+     _mc's origin, so every SWF child coordinate below applies unchanged.
+     Rel. this widget's (2, 72): (-16.5, 11.3). */
+  position: absolute;
+  left: -16.5px;
+  top: 11.3px;
+  width: 448px;
+  height: 330px;
+  z-index: 5;
+}
+
+/* _bg: shape 1736 placed at (118.6, -20.45) scaled 0.99069 x 2.3637 - but
+   the shape's own bounds START at (-13.9, 12), so the rendered art lands at
+   (118.6 - 13.9*0.99069, -20.45 + 12*2.3637) = (104.83, 7.91), spanning
+   328.76 x 304.92. The first cut ignored the bounds origin, drawing the
+   frame 28px high and leaving the putty row poking out the bottom. */
+.atk-catapult-panel::before {
+  content: "";
+  position: absolute;
+  left: 104.83px;
+  top: 7.91px;
+  width: 328.76px;
+  height: 304.92px;
+  background: url("/assets/gameui/attack/catapult_panel.png") 0 0 / 100% 100% no-repeat;
+}
+
+/* The lighter-yellow group boxes (shape 1738, placed at identity): one
+   rounded pane behind each bomb family, over the frame, under the titles
+   and slots - its own bounds start at (123.15, 16.05). */
+.atk-cat-groups {
+  position: absolute;
+  left: 123.15px;
+  top: 16.05px;
+  width: 304.6px;
+  height: 288.4px;
+  background: url("/assets/gameui/attack/catapult_groups.png") 0 0 / 100% 100% no-repeat;
+  pointer-events: none;
+}
+
+.atk-catapult-panel[hidden] { display: none; }
+
+/* tTitleTwig (318.1, 22.65), tTitlePebble (320.6, 123.1), tTitlePutty
+   (300.6, 219.1): Verdana 11 black, right-aligned. */
+.atk-cat-title {
+  position: absolute;
+  text-align: right;
+  font: 700 11px/1 Verdana, sans-serif;
+  color: #000;
+}
+
+.atk-cat-title.tw { left: 318.1px; top: 24.65px; width: 100.4px; }
+.atk-cat-title.pb { left: 320.6px; top: 125.1px; width: 98.4px; }
+.atk-cat-title.pu { left: 300.6px; top: 221.1px; width: 117.9px; }
+
+/* CATAPULTITEM_view (1743): the 62x62 slot (shape 1739), the item image
+   filling it at 60x60, and _txtMC at (0, 35) - strip shape 1740 with the
+   bomb's name in Verdana 9 #273137 centred. */
+.atk-slot {
+  appearance: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  position: absolute;
+  width: 62px;
+  height: 62px;
+  padding: 0;
+  border: 0;
+  background: url("/assets/gameui/attack/slot.png") 0 0 / 62px 62px no-repeat;
+}
+
+.atk-slot:hover .atk-slot-image,
+.atk-slot:focus-visible .atk-slot-image {
+  filter: brightness(1.15);
+}
+
+.atk-slot-image {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 60px;
+  height: 60px;
+  background: center / contain no-repeat;
+}
+
+.atk-slot-label {
+
+  position: absolute;
+  left: 0;
+  top: 44px;
+  width: 62px;
+  height: 17px;
+  background: url("/assets/gameui/attack/slot_label.png") 0 0 / 62px 17px no-repeat;
+  font: 700 9px/17px Verdana, sans-serif;
+  color: #273137;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* The chaos-weapon chooser: no in-game counterpart (the game only ever
+   shows availableWeapon), so it borrows the CATAPULTITEM slot look on the
+   dark 1733 plate, opening beside the icon with the three weapons. */
+.atk-siege-panel {
+  position: absolute;
+  left: 103px;
+  top: 0;
+  width: 246px;
+  height: 98px;
+  z-index: 5;
+  border-style: solid;
+  border-width: 10px;
+  border-image: url("/assets/gameui/attack/iconbg.png") 20 fill / 10px stretch;
+}
+
+.atk-siege-panel[hidden] { display: none; }
 
 /* ── Game UI skin ───────────────────────────────────────────────────────
    Real Backyard Monsters art in place of the CSS-drawn stand-ins. The ?, +,
@@ -4046,6 +4983,8 @@ select option {
 /* One shared size and treatment for the four icon buttons. */
 #zoom-in-button,
 #zoom-out-button,
+#tools-minimize,
+.dock-minimize,
 #help-button,
 .base-view-close,
 .popup-close {
@@ -4074,8 +5013,10 @@ select option {
 
 /* Zoom controls (worldmap/hud/options), now shipped locally - the
    path must include the assets/ segment, which the proxy does not add. */
-#zoom-in-button  { background-image: url("/assets/ui/controls/button_zoom_in.png"); }
-#zoom-out-button { background-image: url("/assets/ui/controls/button_zoom_out.png"); }
+#zoom-in-button { background-image: url("/assets/ui/controls/button_zoom_in.png"); }
+#zoom-out-button,
+#tools-minimize,
+.dock-minimize   { background-image: url("/assets/ui/controls/button_zoom_out.png"); }
 #help-button     { background-image: url("/assets/ui/button_help.png"); }
 
 .base-view-close,
@@ -4083,6 +5024,8 @@ select option {
 
 #zoom-in-button:hover,
 #zoom-out-button:hover,
+#tools-minimize:hover,
+.dock-minimize:hover,
 #help-button:hover,
 .base-view-close:hover,
 .popup-close:hover {
@@ -4109,3 +5052,1801 @@ select option {
     box-sizing: content-box;
   }
 }
+
+
+/* ── Mobile / touch hardening for the yard viewer + attack sim ────────── */
+/* The yard canvas owns its gestures entirely (pointer pan, pinch zoom,
+   tap-to-fling): without this the browser scrolls/zooms the page instead. */
+.base-view-canvas {
+  touch-action: none;
+}
+/* Momentum scrolling on the horizontal strips (flinger monster row, bomb
+   slot rows) with the finger as the scrollbar. */
+.atk-slots,
+.base-view-hud [class*="strip"],
+.base-view-hud [class*="row"] {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+/* The catapult panel is placed with position:fixed + scale from JS when
+   open; its intrinsic 448x330 SWF coordinate box stays untouched. */
+
+
+/* ── Attack simulation beta notice ───────────────────────────────────── */
+.atk-beta-warning {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 8;
+  width: min(430px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
+  padding: 16px 18px 14px;
+  border-radius: 12px;
+  background: rgba(28, 23, 14, 0.97);
+  border: 1px solid rgba(255, 210, 90, 0.45);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+  color: #f4edd8;
+  font: 12px/1.5 Verdana, sans-serif;
+}
+.atk-beta-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #ffd45a;
+  margin-bottom: 8px;
+  text-shadow: 1px 1px 0 #000;
+}
+.atk-beta-body ul {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+.atk-beta-body li { margin: 3px 0; }
+.atk-beta-skip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 8px;
+  color: #cfc5a8;
+  cursor: pointer;
+}
+.atk-beta-ok {
+  display: block;
+  margin: 0 auto;
+  min-width: 96px;
+  height: 28px;
+  cursor: pointer;
+}
+
+
+/* The FLINGER monster rows ("Fang Level 3", the 0/999 counts) carry the
+   game's black GlowFilter ring - a shadow ring, not text-stroke, which
+   eats glyph counters at this size. The catapult/chaos panel labels do
+   NOT get it (that art carries its own styling). */
+.atk-row-name,
+.atk-row-count {
+  text-shadow:
+    -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000,
+    0 -1px 0 #000, 0 1px 0 #000, -1px 0 0 #000, 1px 0 0 #000;
+}
+
+
+/* Flinger level dropdown: sits exactly where "Level X" used to render -
+   the tail of the name line - dressed in the flinger's own wood-and-gold
+   scheme with a custom chevron (native arrows clash with the panel). */
+.atk-row-level {
+  position: absolute;
+  left: 118px;
+  top: 2px;
+  width: 76px;
+  height: 21px;
+  padding: 0 16px 0 6px;
+  appearance: none;
+  -webkit-appearance: none;
+  font: 700 11px/19px var(--font-display), Verdana, sans-serif;
+  color: #fff;
+  text-shadow: 1px 1px 0 #000;
+  background:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%23ffd45a'/></svg>")
+      no-repeat right 5px center,
+    linear-gradient(#4a3517, #2b1d0c);
+  border: 1px solid #8a6a30;
+  border-radius: 4px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+.atk-row-level:hover { border-color: #c99a3e; }
+.atk-row-level:focus {
+  outline: none;
+  border-color: #ffd45a;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 0 5px rgba(255, 212, 90, 0.45);
+}
+.atk-row-level option,
+.atk-row-level option:disabled {
+  font: 700 11px Verdana, sans-serif;
+  background: #2b1d0c;
+  color: #fff;
+  text-shadow: none;
+}
+.atk-row-level option:disabled { color: #ffd45a; }
+/* the name yields the level slot to the dropdown */
+.atk-row-name { width: 64px; }
+
+/* --- Tools popup (the toolbar's nav tools, relocated) --- */
+.tools-panel {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 30;
+  width: 216px;
+  padding: 14px 12px 12px;
+}
+.tools-title { margin: 0 0 8px; }
+.tools-list { display: flex; flex-direction: column; gap: 8px; }
+.tools-list .tb-item { position: relative; display: block; }
+.tools-list .tb-button,
+.tools-list .game-button { width: 100%; }
+.tools-list .tb-menu {
+  left: calc(100% + 14px);
+  right: auto;
+  top: 0;
+  min-width: 240px;
+}
+/* Minimized toolbox: the wooden res-bar, the + fully inside near the
+   top, and MAP TOOLS reading bottom-to-top in gold with a 1.5px black
+   stroke (option D, embiggened). */
+.tools-restore {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 30;
+  width: 29px;
+  height: 135px;
+  padding: 0;
+  border: 0;
+  background: url("/assets/ui/tools_bar.png") center / 29px 135px no-repeat transparent;
+  cursor: pointer;
+}
+.tools-restore:hover { filter: brightness(1.1); }
+.tools-restore-plus {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 27px;
+  height: 27px;
+  background: url("/assets/ui/controls/button_zoom_in.png") center / contain no-repeat;
+}
+.tools-restore-label {
+  position: absolute;
+  top: 17px;
+  bottom: 2px;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  /* One line, always: in vertical writing the zone's HEIGHT is the line
+     length, and browser Verdana runs longer than the preview's font -
+     nowrap stops the second column, overflow stays visible. */
+  white-space: nowrap;
+  overflow: visible;
+  font: 700 13px/1 Verdana, sans-serif;
+  letter-spacing: 1px;
+  color: #ffcc44;
+  -webkit-text-stroke: 1.5px #000;
+  paint-order: stroke fill;
+  text-shadow: 0 0 1px #000;
+  pointer-events: none;
+}
+.leaderboard-divider {
+  text-align: center;
+  opacity: 0.75;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  padding: 6px 0;
+  user-select: none;
+}
+
+/* x on dismissible map overlays (session-expired notice) */
+.map-overlay-card { position: relative; }
+.map-overlay-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 22px;
+  line-height: 1;
+  z-index: 1;
+}
+
+/* Home + Jump share one line in the tools popup, wearing the game button */
+.tools-row { display: flex; gap: 8px; }
+.tools-row .tb-item { flex: 1; min-width: 0; }
+.tools-row .game-button { width: 100%; }
+/* Minimize is the old zoom-out corner button, parked in the SAME
+   corner slot the cell popup's x occupies: hanging over the frame edge
+   at the game-frame close offsets. */
+.tools-panel > .tools-minimize {
+  position: absolute;
+  top: calc(-10px * var(--fs, 1));
+  right: calc(-7px * var(--fs, 1));
+  z-index: 2;
+}
+
+/* Inside the tools popup the search item must not keep its toolbar width
+   (min(360px, ...) overflowed the 216px panel): it fits the list like
+   every other item, and only the DROPDOWN keeps a comfortable width. */
+.tools-list .map-search-panel {
+  width: 100%;
+  min-width: 0;
+}
+.tools-list .map-search-panel .tb-menu-search {
+  width: min(320px, calc(100vw - 60px));
+}
+
+/* In the toolbar the search item is its own dark card (padding, border,
+   shadow, blur). In the tools popup that card read as a dark outline
+   around one button - strip it so Search looks like its siblings. */
+.tools-list .map-search-panel {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+/* The search dropdown flies right like the other menus. */
+.tools-list .map-search-panel .tb-menu-search {
+  left: calc(100% + 14px);
+  top: 0;
+}
+
+/* --- Game-styled modals (Jump / Add bookmark), MapRoomPopup layout --- */
+.mr2-modal-blocker {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.25);
+}
+.mr2-modal {
+  position: absolute;
+  z-index: 41;
+  left: 50%;
+  top: 38%;
+  transform: translate(-50%, -50%);
+  width: 295px;
+  padding: 18px 16px 14px;
+  text-align: center;
+}
+#bookmark-add-modal { width: 325px; }
+.mr2-modal-message {
+  margin: 0 0 10px;
+  font: 700 13px/1.35 Verdana, sans-serif;
+  color: #000;
+  text-align: left;
+}
+/* The popup interior is ONE white rounded card spanning the frame
+   (symbol 2072/2088): content sits left-aligned on it. */
+.mr2-modal-card {
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  padding: 10px 12px 12px;
+  text-align: left;
+}
+.mr2-modal-fields { display: flex; gap: 8px; align-items: center; }
+.mr2-modal-x { font: 700 12px/1 Verdana, sans-serif; color: #000; }
+.mr2-modal-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  padding: 5px 6px;
+  font: 700 13px/1.2 Verdana, sans-serif;
+  text-align: left;
+  border: 1px solid #000;
+  border-radius: 2px;
+  background: #fff;
+  color: #000;
+}
+.mr2-modal-name { flex: 1; min-width: 0; }
+.mr2-modal-action {
+  min-width: 0;
+  padding: 0 14px;
+  flex: 0 0 auto;
+}
+
+/* GLOBAL.Message stand-in: a brief centred toast */
+.mr2-toast {
+  position: absolute;
+  z-index: 50;
+  left: 50%;
+  top: 24%;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  background: rgba(18, 13, 10, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  pointer-events: none;
+  transition: opacity 300ms ease;
+}
+
+/* --- Bookmark flyout: MapRoomBookmark plate rows right of the button --- */
+.bookmark-flyout {
+  position: absolute;
+  left: calc(100% + 14px);
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+}
+/* The bare mcBG plate (child sprite 2021, 140x30): white with its own
+   border - so the name renders BLACK, like the game's tName field. The
+   delete x is the real buttonClose_CLIP art (red square), sitting where
+   bDelete sits. */
+.bookmark-row-plate {
+  position: relative;
+  width: 140px;
+  height: 30px;
+  border: 0;
+  padding: 1px 30px 2px 8px;
+  background: url("/assets/ui/bookmark_row.png") 0 0 / 140px 30px no-repeat;
+  color: #000;
+  font: 400 11px/28px Verdana, sans-serif;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.bookmark-row-delete {
+  position: absolute;
+  right: 3px;
+  top: 4px;
+  width: 24px;
+  height: 15px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  padding: 0;
+  background: url("/assets/ui/bookmark_delete.png") center / contain no-repeat transparent;
+  color: transparent;
+  text-indent: -9999px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.bookmark-row-delete:hover { filter: brightness(1.15); }
+.cg-actions .cell-bookmark-button { margin-top: 0; }
+
+.mr2-modal-sub { font-weight: 400; font-size: 12px; }
+
+/* Search modal: same chrome as Jump / New Bookmark, centred. Results
+   drop inside the white card below the input. */
+#search-modal { width: 325px; }
+#search-modal .search-shell { position: relative; }
+#search-modal .search-input { width: 100%; }
+#search-modal .search-results {
+  position: static;
+  margin-top: 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+#search-modal .search-status { margin: 8px 0 0; }
+
+/* --- Yard-planner zoom slider (BasePlannerPopup_ZoomLayout art) --- */
+.zoom-slider {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 27px;
+  user-select: none;
+}
+.zoom-slider-btn {
+  width: 18px;
+  height: 18px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  padding: 0;
+  background: center / contain no-repeat transparent;
+  cursor: pointer;
+  z-index: 1;
+}
+.zoom-slider-btn:hover { filter: brightness(1.15); }
+.zoom-slider-plus  { background-image: url("/assets/ui/zoom_plus.png"); }
+.zoom-slider-minus { background-image: url("/assets/ui/zoom_minus.png"); }
+.zoom-slider-track {
+  position: relative;
+  width: 8px;
+  height: 96px;
+  /* the stick's pointed tips tuck under the buttons, like the game clip */
+  margin: -3px 0;
+  background: url("/assets/ui/zoom_track.png") center / 8px 100% no-repeat;
+  touch-action: none;
+  cursor: pointer;
+}
+.zoom-slider-thumb {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 0;
+  width: 20px;
+  height: 8px;
+  background: url("/assets/ui/zoom_thumb.png") center / contain no-repeat;
+  pointer-events: none;
+}
+
+/* Expanded toolbox: MAP TOOLS heading above Home/Jump, same lettering
+   as the minimized bar. */
+.tools-heading {
+  margin: 0 0 8px;
+  text-align: center;
+  font: 700 13px/1 Verdana, sans-serif;
+  letter-spacing: 1px;
+  color: #ffffff;
+  -webkit-text-stroke: 1.5px #000;
+  paint-order: stroke fill;
+  text-shadow: 0 0 1px #000;
+  user-select: none;
+}
+/* Bookmarks matches the row buttons' size, centred, with 5px under */
+.tools-list > .tb-item:last-child {
+  width: calc(50% - 4px);
+  margin: 0 auto 5px;
+}
+
+/* --- Servers modal --- */
+#worlds-modal { width: 340px; }
+.world-open-link {
+  display: block;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+  opacity: 0.85;
+}
+.world-open-link:hover { text-decoration: underline; opacity: 1; }
+.toolbar-world-stack { display: inline-flex; flex-direction: column; }
+.worlds-modal-list { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow: auto; }
+.worlds-modal-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  text-align: left;
+  padding: 7px 9px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  background: #f6f0e3;
+  color: #222;
+  cursor: pointer;
+  font: 400 12px/1.3 Verdana, sans-serif;
+}
+.worlds-modal-row:hover { background: #efe6d0; }
+.worlds-row-name { font-weight: 700; }
+.worlds-row-count { color: #555; font-size: 11px; }
+.worlds-row-tag { font-size: 11px; font-weight: 700; color: #8a6d1d; }
+.worlds-row-tag.viewing { color: #1d7a2c; }
+
+/* --- Left dock: MAP TOOLS + the four relocated widgets --- */
+.left-dock {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-height: calc(100% - 28px);
+  overflow: visible;
+}
+.left-dock .tools-panel,
+.left-dock .tools-restore {
+  position: relative;
+  top: auto;
+  left: auto;
+}
+.dock-item { position: relative; }
+/* Minimized bars share the MAP TOOLS bar look */
+.dock-bar {
+  position: relative;
+  display: block;
+  width: 29px;
+  height: 135px;
+  padding: 0;
+  border: 0;
+  background: url("/assets/ui/tools_bar.png") center / 29px 135px no-repeat transparent;
+  cursor: pointer;
+}
+.dock-bar:hover { filter: brightness(1.1); }
+.dock-bar .alliance-badge {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+}
+/* Expanded dock panels share the toolbox chrome */
+.dock-panel {
+  position: relative;
+  width: 320px;
+  padding: 14px 12px 12px;
+}
+.dock-content {
+  max-height: min(520px, 62vh);
+  overflow: auto;
+  font-size: 12.5px;
+}
+/* The filter dropdown renders statically inside its panel */
+.dock-content > .filter-menu {
+  position: static;
+  display: block;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  width: auto;
+  max-height: none;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 0;
+  backdrop-filter: none;
+}
+
+.dock-panel > .dock-minimize {
+  position: absolute;
+  top: calc(-10px * var(--fs, 1));
+  right: calc(-7px * var(--fs, 1));
+  z-index: 2;
+}
+
+/* --- Dock v2: readable, one-at-a-time, side-anchored big panels --- */
+.right-dock {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+/* Right-side bars read the mirrored way (rotated 180 from the left) */
+.right-dock .tools-restore-label { transform: none; }
+/* Panels float beside their bar instead of displacing the column, and
+   can take most of the screen. */
+.dock-item > .dock-panel {
+  position: absolute;
+  top: 0;
+  z-index: 35;
+  width: min(560px, calc(100vw - 120px));
+}
+.left-dock .dock-item > .dock-panel { left: 37px; }
+.right-dock .dock-item > .dock-panel { right: 37px; left: auto; }
+.dock-content {
+  max-height: min(78vh, 720px);
+  overflow: auto;
+  /* The white game card carries readability, exactly like the Jump /
+     New Bookmark / Search modals - the widget content was written for
+     dark dropdowns and vanished against the frame. */
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #222;
+}
+.dock-content .muted,
+.dock-content .nav-help,
+.dock-content .filter-help,
+.dock-content .watch-subheading,
+.dock-content .filter-match-count { color: #555; }
+.dock-content .eyebrow,
+.dock-content .filter-section-title { color: #333; }
+.dock-content h2 { color: #111; }
+.dock-content .filter-menu-header h2 { color: #111; }
+.dock-bar.active { filter: brightness(1.22); }
+
+/* --- Dock v3: panels under the toolbar edge, per-panel widths --- */
+.dock-item { position: static; }        /* panels anchor to the DOCK */
+.left-dock .dock-item > .dock-panel,
+.left-dock .tools-panel {
+  position: absolute;
+  top: 0;                                /* dock top = just under toolbar */
+  left: 37px;
+  z-index: 35;
+}
+.right-dock .dock-item > .dock-panel {
+  position: absolute;
+  top: 0;
+  right: 37px;
+  left: auto;
+  z-index: 35;
+}
+#dock-alliance-panel { width: min(680px, calc(100vw - 140px)); }
+#dock-leaderboard-panel { width: min(720px, calc(100vw - 140px)); }
+#dock-settings-panel { width: min(460px, calc(100vw - 140px)); }
+
+/* Settings sections */
+.settings-section { margin-bottom: 14px; }
+.settings-section-title { margin: 0 0 6px; font-weight: 700; color: #333; }
+.settings-section:last-of-type { margin-bottom: 4px; }
+
+/* Readability sweep: everything the widgets render inside the white
+   card reads dark unless it carries its own themed control. */
+.dock-content label,
+.dock-content .watch-toggle,
+.dock-content .watch-toggle span,
+.dock-content .loot-check,
+.dock-content .loot-check span,
+.dock-content .loot-radio,
+.dock-content .loot-radio span,
+.dock-content .alliance-content,
+.dock-content .alliance-content p,
+.dock-content .leaderboard-list,
+.dock-content .filter-inactivity-toggle,
+.dock-content .filter-inactivity-toggle span,
+.dock-content .scan-intro,
+.dock-content .activity-status { color: #222; }
+.dock-content a { color: #7a4a00; }
+.tools-restore.active { filter: brightness(1.22); }
+
+/* ================= Dock readability & theming pass ================= */
+
+/* --- Search modal: the input stays a visible white box in focus, and
+   results wear the white-card theme. --- */
+#search-modal .search-input,
+#search-modal .search-input:focus,
+#search-modal .search-input:focus-visible {
+  background: #fff;
+  color: #000;
+  border: 1px solid #000;
+  box-shadow: none;
+  outline: 2px solid rgba(59, 111, 181, 0.45);
+  outline-offset: 1px;
+}
+#search-modal .search-input { outline: none; }
+#search-modal .search-results {
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 4px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  color: #222;
+}
+#search-modal .search-results button,
+#search-modal .search-results .search-result {
+  color: #222;
+  background: transparent;
+}
+#search-modal .search-results button:hover,
+#search-modal .search-results .search-result:hover,
+#search-modal .search-results .search-result.active {
+  background: #e8e0cd;
+  color: #000;
+}
+#search-modal .search-status { color: #555; }
+
+/* --- Alliance: light surfaces, alliance-blue accents. --- */
+.dock-content .alliance-content { --ally-blue: #2f5fa3; --ally-blue-dark: #1d3f6e; }
+.dock-content .alliance-tabs { background: #e4e4e4; border-radius: 10px; }
+.dock-content .alliance-tab { color: #444; }
+.dock-content .alliance-tab:hover { color: #000; }
+.dock-content .alliance-tab.active {
+  background: rgba(47, 95, 163, 0.16);
+  color: var(--ally-blue-dark, #1d3f6e);
+}
+.dock-content .alliance-tab.unread::after { background: #2f5fa3; }
+.dock-content .alliance-chat-log,
+.dock-content .alliance-members,
+.dock-content .alliance-section {
+  background: #efefef;
+  color: #222;
+}
+.dock-content .alliance-member-row:nth-child(odd),
+.dock-content .alliance-roster-row:nth-child(odd) { background: #e3e3e3; }
+.dock-content .alliance-identity-name { color: #111; }
+.dock-content .alliance-identity-meta { color: #555; }
+.dock-content .alliance-title { color: var(--ally-blue-dark, #1d3f6e); }
+.dock-content .alliance-member-count { color: #555; }
+/* Rank pills: black backing + border so every colour reads. */
+.dock-content .alliance-rank-pill {
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid #000;
+}
+.dock-content .alliance-rank-pill.rank-leader  { color: #ffd97a; border-color: #000; background: rgba(0,0,0,0.72); }
+.dock-content .alliance-rank-pill.rank-officer { color: #9cc3ff; border-color: #000; background: rgba(0,0,0,0.72); }
+.dock-content .alliance-rank-pill.rank-member  { color: #f0f0f0; border-color: #000; background: rgba(0,0,0,0.72); }
+.dock-content .alliance-rank-pill.rank-recruit { color: #cfcfcf; border-color: #000; background: rgba(0,0,0,0.72); }
+/* Yellow accents -> alliance blue inside the panel */
+.dock-content .alliance-content .secondary-button { color: #1d3f6e; }
+.dock-content .alliance-content a { color: #2f5fa3; }
+
+/* --- Activity tabs on the white card --- */
+.dock-content .activity-tabs { background: #e4e4e4; border-radius: 10px; }
+.dock-content .activity-tab { color: #444; }
+.dock-content .activity-tab:hover { color: #000; }
+.dock-content .activity-tab.active,
+.dock-content .activity-tab[aria-selected="true"] {
+  background: rgba(47, 95, 163, 0.16);
+  color: #1d3f6e;
+  font-weight: 700;
+}
+
+/* --- Filters: search-box theming + readable controls --- */
+.dock-content .filter-player-input,
+.dock-content .filter-player-input:focus,
+.dock-content .filter-player-input:focus-visible {
+  background: #fff;
+  color: #000;
+  border: 1px solid #000;
+  border-radius: 2px;
+  box-shadow: none;
+}
+.dock-content .filter-player-results {
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  color: #222;
+}
+.dock-content .filter-player-results button:hover,
+.dock-content .filter-player-results .search-result:hover { background: #e8e0cd; color: #000; }
+.dock-content .filter-options label,
+.dock-content .filter-options span { color: #222; }
+.dock-content input[type="checkbox"],
+.dock-content input[type="radio"] { accent-color: #2f5fa3; outline: 1px solid rgba(0,0,0,0.5); outline-offset: 0; border-radius: 2px; }
+.dock-content .filter-level-range-value { color: #222; font-weight: 700; }
+.dock-content .filter-player-list { color: #222; }
+
+/* --- Leaderboard: tighter, smaller, striped --- */
+#dock-leaderboard-panel .dock-content { font-size: 11px; }
+#dock-leaderboard-panel .leaderboard-row {
+  gap: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+#dock-leaderboard-panel .leaderboard-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#dock-leaderboard-panel .leaderboard-list > .leaderboard-row:nth-child(odd) { background: #e6e6e6; }
+#dock-leaderboard-panel .leaderboard-header { background: #d8d8d8 !important; font-weight: 700; }
+#dock-leaderboard-panel .leaderboard-list { color: #222; }
+
+/* --- Round 2 polish --- */
+/* Usernames in search / filter results read black */
+#search-modal .search-results :is(span, strong, div, b, em),
+.dock-content .filter-player-results :is(span, strong, div, b, em) { color: #111; }
+
+/* Alliance names wear their map colours */
+.dock-content .alliance-identity-name,
+.dock-content .alliance-chat-author {
+  /* Neutral by default; the name-self/ally/enemy relation classes applied in
+     JS carry the map colors, so only genuine allies read cyan. */
+  color: #111;
+  font-weight: 700;
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.55);
+}
+.dock-content .alliance-identity-name.name-self,
+.dock-content .alliance-chat-author.name-self { color: #5aa9ff; }
+.dock-content .alliance-identity-name.enemy-name { color: #ff5c4a; }
+
+/* Chat + feed zebra: every other row white over the light grey */
+.dock-content .alliance-chat-log > .alliance-chat-line:nth-child(even),
+.dock-content .alliance-member-row:nth-child(even),
+.dock-content .alliance-roster-row:nth-child(even) { background: #fff; }
+
+/* Leaderboard: full 8-column compact grid, no wrapping */
+#dock-leaderboard-panel .leaderboard-row {
+  grid-template-columns: 26px 22px minmax(0, 1.2fr) 48px 42px 46px 38px 38px;
+  gap: 3px;
+  padding: 2px 4px;
+  font-size: 10.5px;
+}
+
+/* --- Round 3 polish --- */
+/* Minimize buttons keep their art on hover (a shorthand background on
+   .corner-button:hover was blanking the image at equal specificity). */
+.dock-panel > .dock-minimize:hover,
+.tools-panel > .tools-minimize:hover {
+  background: url("/assets/ui/controls/button_zoom_out.png") center / contain no-repeat transparent;
+  filter: brightness(1.18);
+}
+
+/* Alliance: white surfaces; zebra becomes white + faint grey */
+.dock-content .alliance-chat-log,
+.dock-content .alliance-members,
+.dock-content .alliance-section { background: #fff; }
+.dock-content .alliance-chat-log > .alliance-chat-line:nth-child(odd),
+.dock-content .alliance-member-row:nth-child(odd),
+.dock-content .alliance-roster-row:nth-child(odd),
+.dock-content .alliance-feed-row:nth-child(odd) { background: #f3f3f3; }
+.dock-content .alliance-chat-log > .alliance-chat-line:nth-child(even),
+.dock-content .alliance-member-row:nth-child(even),
+.dock-content .alliance-roster-row:nth-child(even),
+.dock-content .alliance-feed-row:nth-child(even) { background: #fff; }
+
+/* Relation colours anywhere in a dock panel */
+.dock-content .name-self  { color: #5aa9ff; font-weight: 700; text-shadow: 0 0 1px rgba(0,0,0,0.55); }
+.dock-content .name-ally  { color: #34d6ec; font-weight: 700; text-shadow: 0 0 1px rgba(0,0,0,0.55); }
+.dock-content .name-enemy { color: #ff5c4a; font-weight: 700; text-shadow: 0 0 1px rgba(0,0,0,0.55); }
+
+/* Activity tabs spread evenly */
+.dock-content .activity-tabs { display: flex; gap: 4px; }
+.dock-content .activity-tab { flex: 1 1 0; text-align: center; }
+
+/* Filter player chip names: grey, not pale yellow */
+.dock-content .filter-player-chip-name { color: #555; }
+
+/* Leaderboard: clamp the name column (1/5th the old stretch) and let the
+   panel run nearly the full viewport height when the list is long. */
+#dock-leaderboard-panel .leaderboard-row {
+  grid-template-columns: 26px 22px minmax(70px, 150px) 48px 42px 46px 38px 38px;
+}
+#dock-leaderboard-panel .dock-content { max-height: calc(100vh - 130px); }
+
+/* Cell popup docks bottom-centre, like the mobile sheet */
+.map-panel .details-panel {
+  top: auto;
+  bottom: 12px;
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(340px, calc(100vw - 40px));
+  max-height: min(62vh, calc(100% - 24px));
+}
+
+/* --- Round 4 --- */
+/* Minimize buttons: explicit base art at the same strength as the hover
+   rule, so they are visible in BOTH states regardless of the
+   .corner-button shorthand interplay. */
+.dock-panel > .dock-minimize,
+.tools-panel > .tools-minimize {
+  background: url("/assets/ui/controls/button_zoom_out.png") center / contain no-repeat transparent;
+}
+
+/* Leaderboard: smaller still */
+#dock-leaderboard-panel .dock-content { font-size: 9.5px; }
+#dock-leaderboard-panel .leaderboard-row {
+  font-size: 9.5px;
+  padding: 1px 3px;
+  gap: 2px;
+}
+
+/* Alliance chat composer wears the search-box theme */
+.dock-content .alliance-form-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 6px;
+  font: 700 13px/1.2 Verdana, sans-serif;
+  background: #fff;
+  color: #000;
+  border: 1px solid #000;
+  border-radius: 2px;
+  box-shadow: none;
+}
+.dock-content .alliance-form-row input[type="text"]:focus,
+.dock-content .alliance-form-row input[type="text"]:focus-visible {
+  background: #fff;
+  color: #000;
+  border-color: #000;
+  outline: 2px solid rgba(47, 95, 163, 0.45);
+  outline-offset: 1px;
+}
+.dock-content .alliance-form-row .secondary-button {
+  background: #fff;
+  color: #000;
+  border: 1px solid #000;
+  border-radius: 2px;
+  font-weight: 700;
+}
+.dock-content .alliance-form-row .secondary-button:hover {
+  background: #e8e0cd;
+}
+
+/* --- Desktop cell card grid --- */
+.cellgrid {
+  display: flex;
+  /* stretch: every column runs the full card height, so the dividers
+     span top to bottom and rows can distribute evenly. */
+  align-items: stretch;
+  gap: 0;
+}
+.cg-avatar {
+  flex: 0 0 auto;
+  padding-right: 10px;
+  display: flex;
+  align-items: stretch;
+}
+.cg-avatar .cell-owner-photo {
+  height: 100%;
+  min-height: 96px;
+  aspect-ratio: 1 / 1;
+  width: auto;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+}
+.cg-col {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  /* even vertical rhythm across the full column height */
+  justify-content: space-between;
+  gap: 3px;
+}
+.cg-col + .cg-col {
+  border-left: 1px solid rgba(0, 0, 0, 0.25);
+  margin-left: 10px;
+  padding-left: 10px;
+}
+.cg-actions { flex: 0 0 112px; }
+.cg-line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.3;
+  color: #222;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cg-name { font-weight: 700; font-size: 13px; }
+.cg-alliance { color: #555; }
+.cell-action-button {
+  width: 100%;
+  height: 25px;
+  min-height: 25px;
+  padding: 0 4px;
+  font-size: 12px !important;
+  line-height: 25px;
+}
+/* The card grows to fit its columns, still bottom-centred */
+.map-panel .details-panel {
+  width: auto;
+  min-width: 340px;
+  max-width: min(920px, calc(100vw - 40px));
+}
+
+/* --- Docks hug the edges at 5px --- */
+.left-dock { left: 5px; }
+.right-dock { right: 5px; }
+
+/* Zoom bar + help ride the right dock, centred under the bars */
+.right-dock .corner-buttons {
+  position: static;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 29px;
+  align-self: flex-end;
+  margin-top: 2px;
+}
+
+/* Action-button order inside every cell card:
+   invite/jump, Copy Link, Bookmark, View */
+.cg-actions { display: flex; flex-direction: column; }
+.cg-actions > * { order: 5; }
+.cg-actions .cg-act-first { order: 1; }
+.cg-actions .cell-copy-button { order: 2; }
+.cg-actions .cell-bookmark-button { order: 3; }
+.cg-actions .cell-view-button { order: 5; }
+
+/* The card fits BETWEEN the dock columns, never over them */
+.map-panel .details-panel {
+  max-width: calc(100vw - 96px);
+}
+
+/* Mobile: the same card, columns stacked vertically */
+@media (max-width: 700px) {
+  .cellgrid { flex-direction: column; }
+  .cg-avatar { padding-right: 0; padding-bottom: 8px; }
+  .cg-avatar .cell-owner-photo { min-height: 72px; height: 72px; }
+  .cg-col + .cg-col {
+    border-left: 0;
+    margin-left: 0;
+    padding-left: 0;
+    border-top: 1px solid rgba(0, 0, 0, 0.25);
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+}
+
+/* Leaderboard gets a real scroll bar */
+#dock-leaderboard-panel .dock-content {
+  overflow-y: scroll;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.45) rgba(0, 0, 0, 0.08);
+}
+#dock-leaderboard-panel .dock-content::-webkit-scrollbar { width: 10px; }
+#dock-leaderboard-panel .dock-content::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 5px;
+}
+#dock-leaderboard-panel .dock-content::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* --- Top strip replaces the toolbar --- */
+.top-strip {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 32;
+  padding: 10px 12px 8px;
+  width: max-content;
+  max-width: calc(100vw - 96px);
+}
+.top-strip-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  font: 700 13px/1.2 Verdana, sans-serif;
+  color: #000;
+  padding: 6px 10px;
+}
+.strip-title { font-weight: 700; }
+#world-cached-prefix { color: #7a4a00; }
+.top-strip .world-open-link {
+  color: #2f5fa3;
+  opacity: 1;
+  font-size: 12px;
+  font-weight: 700;
+}
+.strip-sep { color: rgba(0, 0, 0, 0.45); }
+.strip-session { display: inline-flex; align-items: center; gap: 8px; }
+.strip-not-signed { color: #555; font-weight: 400; order: -1; }
+#account-button[hidden] ~ .strip-not-signed { display: none; }
+.strip-auth {
+  height: 24px;
+  padding: 0 12px;
+  font-size: 12px !important;
+  line-height: 24px;
+}
+/* Account modal: readable on the white card */
+#account-modal { width: 380px; }
+.account-modal-card { text-align: left; }
+#account-modal #menu-account { position: static; display: block; }
+#account-modal label span,
+#account-modal .muted,
+#account-modal .nav-help,
+#account-modal .eyebrow,
+#account-modal li { color: #444; }
+#account-modal input {
+  background: #fff;
+  color: #000;
+  border: 1px solid #000;
+  border-radius: 2px;
+}
+
+/* Zoom bar + help: bottom of the screen, same horizontal alignment */
+.corner-buttons {
+  position: absolute;
+  bottom: 14px;
+  right: 5px;
+  top: auto;
+  left: auto;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 29px;
+}
+
+/* Strip: two stacked lines, both centred */
+.top-strip-card { flex-direction: column; gap: 5px; }
+.strip-row { display: inline-flex; align-items: center; gap: 8px; justify-content: center; }
+
+/* Mobile: open dock panels span the whole screen between the bar columns */
+@media (max-width: 700px) {
+  .left-dock .dock-item > .dock-panel,
+  .right-dock .dock-item > .dock-panel {
+    position: fixed;
+    left: 40px;
+    right: 40px;
+    top: 8px;
+    bottom: 8px;
+    width: auto;
+    max-width: none;
+  }
+  .dock-item > .dock-panel .dock-content {
+    max-height: calc(100vh - 90px);
+  }
+}
+
+/* Mobile: the cell popup spans between the bar columns like the panels */
+@media (max-width: 700px) {
+  .map-panel .details-panel {
+    left: 40px;
+    right: 40px;
+    transform: none;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+}
+
+/* Avatar/tribe art: one fixed square for every card, players and wild
+   tribes alike (the tribe PNGs' large natural size was inflating the
+   whole card through the flex stretch loop). */
+.cg-avatar .cell-owner-photo {
+  width: 96px;
+  height: 96px;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
+/* Mobile cell card: centred content, desktop-sized fixed buttons */
+@media (max-width: 700px) {
+  .cellgrid { align-items: center; }
+  .cg-col { align-items: center; width: 100%; }
+  .cg-line { text-align: center; }
+  .cg-avatar { align-self: center; }
+  .cg-avatar .cell-owner-photo { width: 84px; height: 84px; }
+  .cg-actions { align-items: center; }
+  .cg-actions .cell-action-button {
+    width: 140px;
+    min-width: 140px;
+    max-width: 140px;
+  }
+}
+
+/* Mobile cell sheet: inset 50px from each side */
+@media (pointer: coarse), (max-width: 700px) {
+  .mobile-details-sheet {
+    left: 50px !important;
+    right: 50px !important;
+    width: auto !important;
+    max-width: none;
+  }
+}
+
+/* Mobile: the per-panel width caps (id-specificity) were beating the
+   fixed left/right span, leaving a right-side gap - neutralise them so
+   every panel truly runs bar to bar. */
+@media (max-width: 700px) {
+  #dock-alliance-panel,
+  #dock-leaderboard-panel,
+  #dock-settings-panel,
+  .dock-item > .dock-panel {
+    width: auto !important;
+    max-width: none !important;
+  }
+}
+
+/* --- Round 5 --- */
+/* Alliance member/enemy rows: two lines - identity, then the actions */
+.dock-content .alliance-roster-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 5px 6px;
+}
+.dock-content .alliance-roster-row .alliance-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dock-content .alliance-roster-row .name-enemy,
+.dock-content .alliance-roster-row .enemy-name { overflow: visible; }
+.alliance-game-btn {
+  height: 22px;
+  min-height: 22px;
+  padding: 0 12px;
+  font-size: 11px !important;
+  line-height: 22px;
+  width: auto;
+}
+/* Inside the dock card the list flows at natural height (the card is
+   the scroller); the old 420px clamp + overflow:visible let rows paint
+   over the invite row below. */
+.dock-content .alliance-members {
+  overflow: visible;
+  max-height: none;
+  height: auto;
+}
+
+/* Leaderboard: the panel runs to the bottom of the screen and ONLY the
+   card scrolls - the inner list never nests a second scrollbar. */
+#dock-leaderboard-panel {
+  height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+}
+#dock-leaderboard-panel .dock-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+#dock-leaderboard-panel .leaderboard-list {
+  max-height: none;
+  overflow: visible;
+}
+
+/* Mobile: all fixed panels fill their span; content flexes and scrolls */
+@media (max-width: 700px) {
+  .dock-item > .dock-panel {
+    display: flex;
+    flex-direction: column;
+  }
+  .dock-item > .dock-panel .dock-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+  #dock-leaderboard-panel { height: auto; }
+  /* Legacy toolbar-era mobile dropdown styling fought the dock card:
+     hard-reset the filter menu inside its panel. */
+  .dock-content > .filter-menu {
+    position: static !important;
+    inset: auto !important;
+    transform: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    backdrop-filter: none !important;
+  }
+}
+
+/* Announcement: always one line; long text marquees across instead of
+   wrapping. The inner span starts off-screen right and scrolls left
+   through the full text, looping. */
+.announcement-banner {
+  overflow: hidden;
+  white-space: nowrap;
+  flex-wrap: nowrap;
+}
+#announcement-text-view {
+  display: inline-block;
+  white-space: nowrap;
+  min-width: 100%;
+  padding-left: 100%;
+  animation: announce-marquee 22s linear infinite;
+  will-change: transform;
+}
+.announcement-banner:hover #announcement-text-view {
+  animation-play-state: paused;   /* hover to read */
+}
+@keyframes announce-marquee {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #announcement-text-view {
+    animation: none;
+    padding-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+}
+
+/* Passwordless (token) login is a Windows desktop flow - hide the whole
+   option on mobile: the tab, its panel, and the mode bar collapses to
+   just Password. */
+@media (max-width: 700px), (pointer: coarse) {
+  #login-mode-token,
+  #token-login-panel {
+    display: none !important;
+  }
+}
+
+/* --- Leaderboard v3: fixed narrow columns, titles aligned to data --- */
+#dock-leaderboard-panel { width: max-content; min-width: 0; max-width: calc(100vw - 100px); }
+#dock-leaderboard-panel .leaderboard-row {
+  /* #, Jump, Username, Outposts, No kit, Regular, Mega, Ultra, 1d, 7d, 30d */
+  grid-template-columns: 18px 40px minmax(30px, 100px) repeat(5, 40px) 75px;
+  gap: 4px;
+  align-items: center;
+}
+#dock-leaderboard-panel .leaderboard-jump {
+  height: 16px;
+  min-height: 16px;
+  padding: 0 4px;
+  font-size: 9px !important;
+  line-height: 16px;
+  width: 100%;
+}
+#dock-leaderboard-panel .leaderboard-header .leaderboard-count,
+#dock-leaderboard-panel .leaderboard-header .leaderboard-rank,
+#dock-leaderboard-panel .leaderboard-header .leaderboard-name {
+  overflow: hidden;
+  text-overflow: clip;
+}
+.leaderboard-delta { text-align: center; }
+.lb-delta-none { color: #8a8a8a; }
+.lb-delta-up { color: #1d7a2c; font-weight: 700; }
+.lb-delta-down { color: #c0392b; font-weight: 700; }
+
+/* Leaderboard v3.1: black header text, everything left-aligned */
+#dock-leaderboard-panel .leaderboard-header,
+#dock-leaderboard-panel .leaderboard-header .leaderboard-rank,
+#dock-leaderboard-panel .leaderboard-header .leaderboard-name,
+#dock-leaderboard-panel .leaderboard-header .leaderboard-count {
+  color: #000;
+}
+#dock-leaderboard-panel .leaderboard-row > * {
+  text-align: left;
+  justify-self: start;
+}
+#dock-leaderboard-panel .leaderboard-row .leaderboard-jump {
+  justify-self: stretch;
+}
+#dock-leaderboard-panel .leaderboard-delta { text-align: left; }
+
+/* Mobile: the dock leaderboard has the same eight-column problem the old
+   toolbar menu had - the fixed grid is wider than the bar-to-bar panel, and
+   the list's global overflow-x:hidden clipped the right-hand columns (Ultra,
+   1d/7d/30d) clean off. Same cure the menu got: rows keep their layout and
+   the card pans sideways. width:max-content keeps the row stripes painting
+   across the full scrollable width instead of stopping at the visible edge. */
+@media (max-width: 700px) {
+  #dock-leaderboard-panel .dock-content { overflow-x: auto; }
+  #dock-leaderboard-panel .leaderboard-list {
+    width: max-content;
+    min-width: 100%;
+    overflow-x: visible;
+  }
+}
+
+/* Account modal: divider + guest entry */
+.account-divider {
+  height: 1px;
+  background: rgba(0, 0, 0, 0.35);
+  margin: 12px 0;
+}
+.account-guest-btn {
+  display: block;
+  width: 100%;
+  height: 26px;
+  font-size: 12px !important;
+  line-height: 26px;
+}
+
+/* --- Sign-in modal: home-button sizing everywhere --- */
+#account-modal .game-button {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 12px;
+  font-size: 12px !important;
+  line-height: 26px;
+}
+#account-modal .login-mode-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+#account-modal .login-mode-tab { flex: 1; }
+/* Full-state overrides: the legacy pill styling (rounded border, rgba
+   background, yellow active text) outranked the game-button art on the
+   .active state - reassert every property per state. */
+#account-modal .login-mode-tab,
+#account-modal .login-mode-tab:hover {
+  border: 0;
+  border-radius: 0;
+  background: url("/assets/gameui/attack/btn_up.png") center / 100% 100% no-repeat transparent;
+  color: #fff;
+  filter: none;
+  outline: none;
+}
+#account-modal .login-mode-tab.active,
+#account-modal .login-mode-tab.active:hover {
+  border: 0;
+  border-radius: 0;
+  /* Selected method rides the game's highlight frame (Button.as frame 4). */
+  background: url("/assets/gameui/attack/btn_hl.png") center / 100% 100% no-repeat transparent;
+  color: #333333;
+  cursor: default;
+  filter: none;
+  outline: none;
+}
+#account-modal .account-action { width: 100%; display: block; }
+
+/* --- Server picker highlights: the viewed world rides the game's yellow
+   highlight button (btn_hl gradient #FCF801->#F7E200, #666 edge). --- */
+.worlds-modal-row.active {
+  border-color: rgba(0, 0, 0, 0.35);
+  background: #f6f0e3;
+  box-shadow: none;
+}
+.worlds-modal-row.viewing {
+  border: 2px solid #666666;
+  background: linear-gradient(#FCF801, #F7E200);
+  box-shadow: none;
+}
+.worlds-modal-row.viewing:hover {
+  background: linear-gradient(#FEFD77, #FEEC50);
+}
+.worlds-modal-row.viewing .worlds-row-name { color: #333333; }
+.worlds-modal-row.viewing .worlds-row-count { color: #4a4a1a; }
+.worlds-modal-row.home {
+  border: 2px solid #5aa9ff;
+  background: rgba(90, 169, 255, 0.12);
+}
+
+.account-btn-row { display: flex; gap: 8px; margin-top: 6px; }
+.account-btn-row .game-button { flex: 1; width: auto; display: block; }
+
+/* Alliance member cards: 2x2 grid - identity/jump, stats/controls */
+.dock-content .alliance-member-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 10px;
+  align-items: center;
+}
+.dock-content .alliance-member-grid .amg-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dock-content .alliance-member-grid .amg-l1 .alliance-identity-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-content .alliance-member-grid .amg-slot {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 56px;
+}
+.dock-content .alliance-member-grid .amg-l2 { font-size: 11.5px; }
+
+/* Danger alliance buttons now use the yellow highlight art (see the
+   yellow-highlight section at the end of this file). */
+
+/* Alliance invite: sits under the roster with a search dropdown */
+.alliance-invite-wrap { position: relative; flex: 1; min-width: 0; }
+.alliance-invite-wrap input { width: 100%; }
+.alliance-invite-results {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: 180px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 4px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+}
+.alliance-invite-results .search-result {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: #111;
+  font: 400 12px/1.3 Verdana, sans-serif;
+  cursor: pointer;
+}
+.alliance-invite-results .search-result:hover { background: #e8e0cd; color: #000; }
+
+/* Target notes show in full, wrapping as needed */
+.dock-content .alliance-target-note {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+/* Target rows: note on top at full width in black; the second line is
+   Jump, then coords+server, remove pushed to the far right */
+.dock-content .alliance-target-row { width: 100%; }
+.dock-content .alliance-target-row .alliance-target-note {
+  width: 100%;
+  color: #111;
+  font-weight: 700;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.dock-content .alliance-target-actions {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dock-content .alliance-target-where {
+  color: #333;
+  font-size: 11.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-content .alliance-target-actions .danger { margin-left: auto; }
+
+/* --- Export modal --- */
+#export-modal { width: 400px; }
+.export-card { text-align: left; }
+.export-choice {
+  display: block;
+  margin: 6px 0;
+  color: #111;
+  font: 700 12.5px/1.3 Verdana, sans-serif;
+  cursor: pointer;
+}
+.export-choice .export-sub {
+  display: block;
+  margin-left: 22px;
+  color: #555;
+  font-weight: 400;
+  font-size: 10.5px;
+}
+.export-rule { border: 0; border-top: 1px solid rgba(0, 0, 0, 0.3); margin: 10px 0; }
+.export-heading { margin: 8px 0 4px; font: 700 12px/1 Verdana, sans-serif; color: #111; }
+.export-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+.export-cols label { color: #222; font: 400 11px/1.3 Verdana, sans-serif; cursor: pointer; }
+.export-note {
+  margin: 10px 0 0;
+  padding: 6px 8px;
+  background: #eef4fc;
+  border: 1px solid rgba(47, 95, 163, 0.6);
+  border-radius: 4px;
+  color: #1d3a66;
+  font-size: 10.5px;
+}
+#export-modal input[type="radio"],
+#export-modal input[type="checkbox"] { accent-color: #2f5fa3; outline: 1px solid rgba(0,0,0,0.5); }
+
+/* --- Region select layer --- */
+#export-select-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  cursor: crosshair;
+  touch-action: none;
+  background: rgba(0, 0, 0, 0.18);
+}
+#export-select-box {
+  position: absolute;
+  border: 2px solid #ffdc78;
+  outline: 1px solid rgba(0, 0, 0, 0.85);
+  background: rgba(255, 220, 120, 0.10);
+  pointer-events: none;
+}
+.export-corner {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #ffdc78;
+  border: 2px solid #000;
+  pointer-events: auto;
+}
+.export-corner-nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.export-corner-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.export-corner-ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.export-corner-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.export-select-toolbar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid rgba(255, 220, 120, 0.6);
+  border-radius: 6px;
+  cursor: default;
+}
+.export-select-toolbar #export-select-dims {
+  color: #ffdc78;
+  font: 700 12px/1 Verdana, sans-serif;
+  min-width: 90px;
+}
+.export-select-toolbar .game-button {
+  height: 24px;
+  padding: 0 12px;
+  font-size: 11px !important;
+  line-height: 24px;
+}
+
+/* Resource picker rides under "Show loot on map", indented one tab */
+.loot-resource-indent { margin-left: 28px; }
+.loot-resource-indent .loot-resource-eyebrow { margin-top: 4px; }
+
+/* Export progress pill */
+#export-progress {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid rgba(255, 220, 120, 0.7);
+  border-radius: 6px;
+  color: #ffdc78;
+  font: 700 12px/1 Verdana, sans-serif;
+}
+
+/* Sortable leaderboard headers */
+.leaderboard-header .lb-sortable { cursor: pointer; user-select: none; }
+.leaderboard-header .lb-sortable:hover { color: #5aa9ff; }
+
+/* Battle Logs: button sits under Bookmark, modal lists attacks + report */
+.cg-actions .cell-logs-button { order: 4; margin-top: 0; }
+/* Capped to the cell popup's mobile span (40px bar columns each side, same
+   #map-panel containing block), so both popups share one maximum width on
+   phones. Desktop is untouched: the cap only binds once the panel is
+   narrower than 510px. */
+#battlelogs-modal { width: 430px; max-width: calc(100% - 80px); }
+.battlelogs-card { text-align: left; max-height: 70vh; overflow-y: auto; }
+.battlelogs-heading { margin: 10px 0 4px; font: 700 12.5px Verdana, sans-serif; color: #111; }
+.battlelogs-row {
+  padding: 4px 8px;
+  font: 400 12px/1.35 Verdana, sans-serif;
+  color: #222;
+}
+.battlelogs-row:nth-child(even) { background: #f3f3f3; }
+.battlelogs-stamp { font-size: 10.5px; margin-top: 8px; }
+.battlelogs-report-body {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  color: #222;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font: 400 11.5px/1.4 Verdana, sans-serif;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.battlelogs-report-body ul { margin: 0; padding-left: 18px; }
+.battlelogs-report-body li { margin: 2px 0; }
+
+/* Attacker avatars in the battle-logs list */
+.battlelogs-row { display: flex; align-items: center; gap: 8px; }
+.battlelogs-avatar {
+  width: 22px; height: 22px; border-radius: 3px;
+  background: #ddd; flex: 0 0 auto;
+}
+
+/* --- Yellow highlight buttons ---------------------------------------------
+   The game's Button.as drives one clip with five frames; _highlight jumps to
+   frame 4 (btn_hl) and frame 5 on hover (btn_hl_over). The .hl class is the
+   CSS twin of that flag. Per Update(), highlight outranks disabled: the art
+   stays yellow and only the label dims (_txt.alpha = 0.5). */
+.game-button.hl {
+  background-image: url("/assets/gameui/attack/btn_hl.png");
+}
+.game-button.hl:hover:not(:disabled):not([aria-disabled="true"]),
+.game-button.hl:focus-visible:not(:disabled):not([aria-disabled="true"]) {
+  background-image: url("/assets/gameui/attack/btn_hl_over.png");
+}
+.game-button.hl:disabled,
+.game-button.hl[aria-disabled="true"] {
+  background-image: url("/assets/gameui/attack/btn_hl.png");
+  color: rgba(51, 51, 51, 0.5);
+  cursor: default;
+}
+
+/* Measure flips to a yellow Stop while a measurement is armed. */
+#measure-button.active {
+  background-image: url("/assets/gameui/attack/btn_hl.png");
+}
+#measure-button.active:hover,
+#measure-button.active:focus-visible {
+  background-image: url("/assets/gameui/attack/btn_hl_over.png");
+}
+
+/* Alliance: Leave and every destructive X (kick, revoke, remove) go yellow.
+   filter:none retires the old red hue-rotate, which would tint the yellow
+   art green. */
+.alliance-leave,
+.alliance-game-btn.danger {
+  background-image: url("/assets/gameui/attack/btn_hl.png");
+  filter: none;
+}
+.alliance-leave:hover:not(:disabled):not([aria-disabled="true"]),
+.alliance-leave:focus-visible:not(:disabled):not([aria-disabled="true"]),
+.alliance-game-btn.danger:hover:not(:disabled):not([aria-disabled="true"]),
+.alliance-game-btn.danger:focus-visible:not(:disabled):not([aria-disabled="true"]) {
+  background-image: url("/assets/gameui/attack/btn_hl_over.png");
+  filter: none;
+}
+
+/* --- Relationship-colored usernames -----------------------------------
+   Same palette the map renderer uses for base labels: self in map blue,
+   allies in the ally cyan, enemies in enemy red. Global so leaderboard,
+   activity, and alliance lists all pick them up; the .dock-content rules
+   above add the legibility shadow on light card rows. */
+.name-self  { color: #5aa9ff; font-weight: 700; }
+.name-ally  { color: #34d6ec; font-weight: 700; }
+.name-enemy { color: #ff5c4a; font-weight: 700; }
+
+/* --- Reworked filter panel additions ----------------------------------- */
+/* Cell height lists eight bands; unlike the other rows it wraps. */
+.filter-options-wrap { flex-wrap: wrap; overflow-x: visible; }
+/* "Inactive (seen > [N] days ago)" as one flowing line. */
+.filter-inactive-line { flex-wrap: wrap; }
+.filter-days-input {
+  width: 52px;
+  padding: 3px 6px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  background: #fff;
+  color: #222;
+  font: 400 12px Verdana, sans-serif;
+  text-align: center;
+}
+
+/* --- B4 filter cards ---------------------------------------------------- */
+.filter-card {
+  background: rgba(255, 251, 240, 0.85);
+  border: 1px solid #b08a55;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.filter-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.filter-card-title {
+  margin: 0;
+  font: 700 12px Verdana, sans-serif;
+  color: #3a2812;
+}
+.filter-card-badge {
+  display: inline-block;
+  background: #7a5230;
+  color: #f4e6c8;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font: 400 9.5px Verdana, sans-serif;
+  vertical-align: 1px;
+  margin-left: 4px;
+}
+.filter-card-reset {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: #7a5230;
+  font: 400 10px Verdana, sans-serif;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.filter-card-reset:hover { color: #3a2812; }
+.filter-subrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.filter-subrow-label {
+  flex: 0 0 40px;
+  font: 400 10.5px Verdana, sans-serif;
+  color: #7a5230;
+}
+.filter-subrow .filter-options { flex: 1; min-width: 0; }
+.filter-card .filter-options { margin-bottom: 6px; }
+.filter-card .filter-options:last-child,
+.filter-card .filter-subrow:last-child { margin-bottom: 0; }
+/* Unchecked chips read dimmed, per the B4 preview. */
+.filter-chip:has(input:not(:checked)) { opacity: 0.55; }
+.filter-chip:has(input:checked) { opacity: 1; }
+.filter-level-range.disabled { opacity: 0.55; pointer-events: none; }
+.filter-card.disabled { opacity: 0.6; }

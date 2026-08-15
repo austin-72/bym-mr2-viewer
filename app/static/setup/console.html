@@ -275,6 +275,33 @@
           <details class="card">
             <summary>
               <span class="chev">&#9656;</span>
+              <h2>Player Renames</h2>
+              <span class="muted blurb">Username changes the viewer knows about</span>
+            </summary>
+            <div class="cardbody">
+              <p class="muted">
+                The game allows a username change every 6 months. The viewer detects a
+                rename automatically the moment the player signs in (or their session is
+                verified) and moves their settings, alliance seat, allowlist entries and
+                activity to the new name. Renames from <em>before</em> this viewer version
+                cannot be detected automatically &mdash; move those by hand below.
+              </p>
+              <div class="row">
+                <input id="rename-from" placeholder="Old name" autocomplete="off" class="grow">
+                <input id="rename-to" placeholder="New name" autocomplete="off" class="grow">
+                <button id="rename-apply">Move data</button>
+              </div>
+              <p id="rename-status" class="status"></p>
+              <table>
+                <thead><tr><th>Player</th><th>Previous names</th><th>When</th></tr></thead>
+                <tbody id="rename-rows"></tbody>
+              </table>
+            </div>
+          </details>
+
+          <details class="card">
+            <summary>
+              <span class="chev">&#9656;</span>
               <h2>Viewer Users</h2>
               <span class="muted blurb">Accounts that have signed in</span>
             </summary>

@@ -1131,11 +1131,17 @@ export const CREEP_SPRITES = {
 };
 
 // Guardian sheets are per evolution level (G5 Krallen has three).
+// Anchors are the frame CENTRE (w/2, h/2) - the convention Krallen's
+// hand-tuned entries already used. The old flat (26,36) stand-ins made
+// every high-evolution champion (Gorgo L6 at 140x120, Korath L6 at
+// 202x167) draw far below its logical position, which also floated the
+// health bar into the middle of the art: the bar sits at frame-top + 6,
+// so the anchor must actually BE the frame's geometry.
 const GUARDIAN_SHEETS = {
-  1: [["monsters/ape_1.png",96,69,26,36],["monsters/ape_2.png",89,73,26,36],["monsters/ape_3.png",103,88,26,36],["monsters/ape_4.png",148,127,26,36],["monsters/ape_5.png",160,137,26,36],["monsters/ape_6.png",140,120,26,36]],
-  2: [["monsters/dragon_1.png",64,41,26,36],["monsters/dragon_2.png",87,58,26,36],["monsters/dragon_3.png",114,85,26,36],["monsters/dragon_4.png",131,93,26,36],["monsters/dragon_5.png",156,117,26,36],["monsters/dragon_6.png",171,125,26,36]],
-  3: [["monsters/fly_1.png",53,40,26,36],["monsters/fly_2.png",63,46,26,36],["monsters/fly_3.png",98,81,26,36],["monsters/fly_4.png",120,92,26,36],["monsters/fly_5.png",133,105,26,36],["monsters/fly_6.png",124,105,26,36]],
-  4: [["monsters/korath_1.png",72,49,26,36],["monsters/korath_2.png",119,81,26,36],["monsters/korath_3.png",128,102,26,36],["monsters/korath_4.png",153,123,26,36],["monsters/korath_5.png",199,162,26,36],["monsters/korath_6.png",202,167,26,36]],
+  1: [["monsters/ape_1.png",96,69,48,34],["monsters/ape_2.png",89,73,44,36],["monsters/ape_3.png",103,88,51,44],["monsters/ape_4.png",148,127,74,63],["monsters/ape_5.png",160,137,80,68],["monsters/ape_6.png",140,120,70,60]],
+  2: [["monsters/dragon_1.png",64,41,32,20],["monsters/dragon_2.png",87,58,43,29],["monsters/dragon_3.png",114,85,57,42],["monsters/dragon_4.png",131,93,65,46],["monsters/dragon_5.png",156,117,78,58],["monsters/dragon_6.png",171,125,85,62]],
+  3: [["monsters/fly_1.png",53,40,26,20],["monsters/fly_2.png",63,46,31,23],["monsters/fly_3.png",98,81,49,40],["monsters/fly_4.png",120,92,60,46],["monsters/fly_5.png",133,105,66,52],["monsters/fly_6.png",124,105,62,52]],
+  4: [["monsters/korath_1.png",72,49,36,24],["monsters/korath_2.png",119,81,59,40],["monsters/korath_3.png",128,102,64,51],["monsters/korath_4.png",153,123,76,61],["monsters/korath_5.png",199,162,99,81],["monsters/korath_6.png",202,167,101,83]],
   5: [["monsters/krallen_1_rev_65.png",130,80,65,40],["monsters/krallen_2_rev_65.png",131,90,65,45],["monsters/krallen_3_rev_65.png",142,100,71,50]],
 };
 
@@ -1170,13 +1176,66 @@ export function guardianSheetCandidates(t, level) {
  * ticks. G1/G2/G3: idle row 0, walking rows 1..7. G4: walking rows 0..8
  * (levels 1-3) or 0..9 (levels 4+). G5: rows 0..9 for idle and walking.
  */
-const GUARDIAN_ANIM_DIVISOR = 4;
+// SPRITES.GetSprite divides _frameNumber by 8 on the 80/s logic clock
+// (param5 / 8 % 7 + 1), i.e. 10 anim rows per second. The old value of 4
+// was compensating for the step clock running at half rate; with the
+// clock fixed to 80/s, 4 played walk cycles at double the game's tempo.
+const GUARDIAN_ANIM_DIVISOR = 8;
+
+// SPRITES.GetSprite, ported verbatim: the one true map from creature +
+// action + frame counter to a sheet row. Columns are rotation (/22.5 = 16
+// for champions, /12 = 30 for most creeps, /11.25 = 32 for the flyers and
+// spurtz); rows are the action frames, advancing every 8 stage frames as
+// the game does (param5 / 8).
+export function monsterRow(baseId, level, action, tick) {
+  const f = Math.floor(tick / 8);
+  const id = String(baseId || "");
+  if (id[0] === "G") {
+    const t = Number(id.slice(1));
+    const lvl = Math.max(1, Number(level) || 1);
+    if (t === 1 || t === 2) {
+      if (action === "attack") return (f % (lvl >= 4 ? 8 : 7)) + 8;
+      if (action === "walk") return (f % 7) + 1;
+      return 0;
+    }
+    if (t === 3) {
+      if (action === "idle") return 0;
+      // Fomor keeps its fly/walk cycle even while attacking.
+      return (f % (lvl === 1 ? 7 : lvl === 2 ? 8 : 6)) + 1;
+    }
+    if (t === 4) {
+      if (action === "stomp") return (f % 10) + 20;
+      if (action === "attack") {
+        if (lvl <= 2) return (f % 9) + 8;
+        if (lvl === 3) return (f % 10) + 9;
+        return (f % 10) + 10;
+      }
+      const n = lvl <= 2 ? 8 : lvl === 3 ? 9 : 10;
+      return f % n;
+    }
+    if (t === 5) {
+      if (action === "attack") return (f % 6) + 10;
+      return f % 10;
+    }
+    return action === "walk" ? (f % 7) + 1 : 0;
+  }
+  switch (id) {
+    case "C9": return action === "invisible" ? 1 : 0;
+    case "C13": return action === "burrowed" ? 4 : 0;
+    case "C14":
+    case "C16": return Math.floor((tick % 9) / 3);   // wing flap, always
+    case "C19": return action === "walk" ? (f % 5) + 1 : 1;
+    case "IC1": return (f % 2) + 1;
+    case "IC3": return (f % 8) + 1;
+    case "IC5": return (f % 6) + 1;
+    default: return 0;   // C1-C8, C10-C12, C15, C17-C18, the rest: one row
+  }
+}
 
 export function guardianRow(t, level, moving, tick) {
   // Champion sheets are the MovieClip's frames laid out as rows. The game
-  // advances them with ENTER_FRAME; at the viewer's 40-step second a divisor
-  // of 4 gives ~10 rows/sec, which matches the in-game walk cadence. (8 was
-  // half that and read as sluggish.)
+  // advances _frameNumber on the 80/s logic tick and GetSprite divides by
+  // 8, so /8 at the viewer's 80-step second gives the game's ~10 rows/sec.
   const step = Math.floor(tick / GUARDIAN_ANIM_DIVISOR);
   if (t === 5) return step % 10;
   if (t === 4) return step % (level > 3 ? 10 : 9);

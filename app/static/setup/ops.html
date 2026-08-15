@@ -1,0 +1,945 @@
+<!-- Operator console. Served only through /api/admin/ops/console, which
+     verifies the requester is an administrator first - the same rule
+     console.html follows, so this markup never reaches a normal visitor.
+
+     Injected into /setup/index.html, whose stylesheet provides the shared
+     shell classes used below (.group, .grouptitle, .card, .cardbody, .chev,
+     .blurb) plus the base input/button/stone theme. The <style> here only
+     carries ops-specific pieces, tinted to the same palette so both consoles
+     read as one page.
+
+     No CDN, no framework: one file, matching the rest of this project. -->
+<section class="ops" id="ops-root">
+  <style>
+    .ops { background: none; border: 0; border-radius: 0; padding: 0;
+           --ops-panel:rgba(255,255,255,.03); --ops-line:rgba(255,255,255,.11);
+           --ops-well:#140e08;
+           --ops-fg:#efe8da; --ops-dim:#a99f8c; --ops-accent:#f2c76b;
+           --ops-ok:#8fd9a8; --ops-warn:#e9b45c; --ops-bad:#ff8d7d;
+           --ops-scan:#b98cff;
+           color:var(--ops-fg); font:13px/1.45 Verdana, Geneva, "DejaVu Sans", Tahoma, sans-serif; }
+    .ops h2 { font-size:15px; margin:0; letter-spacing:.02em; }
+    .ops-banner { border-left:3px solid var(--ops-accent);
+      background:rgba(255,255,255,.04); padding:9px 12px; margin:0 0 12px;
+      border-radius:0 8px 8px 0; }
+    .ops-banner.bad { border-left-color:var(--ops-bad); }
+    .ops-banner.ok  { border-left-color:var(--ops-ok); }
+    .ops-banner b { color:var(--ops-accent); }
+    .ops-grid { display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); margin-bottom:10px; }
+    .ops-card { background:var(--ops-panel); border:1px solid var(--ops-line);
+      border-radius:10px; padding:10px 12px; }
+    .ops-card .n { font-size:22px; font-weight:bold; color:var(--ops-accent); }
+    .ops-card .l { color:var(--ops-dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+    .ops-spark { display:flex; align-items:flex-end; gap:1px; height:46px;
+      background:var(--ops-panel); border:1px solid var(--ops-line);
+      border-radius:10px; padding:6px; margin-bottom:6px; }
+    .ops-spark i { flex:1 1 0; min-width:1px; display:block; background:var(--ops-dim); position:relative; }
+    .ops-spark i.has404 { background:var(--ops-warn); }
+    .ops-spark i.has403 { background:var(--ops-bad); }
+    .ops-spark i.hasScan { background:var(--ops-scan); }
+    .ops-bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+      background:var(--ops-panel); border:1px solid var(--ops-line);
+      border-radius:10px; padding:8px; margin-bottom:10px; }
+    .ops-bar input, .ops-bar select { padding:5px 8px; font-size:12px; }
+    .ops-bar button { padding:4px 11px; font-size:12px; }
+    .ops-bar label { color:var(--ops-dim); font-size:11px; display:flex; gap:4px; align-items:center; }
+    /* Stream toggles are state chips, not actions, so they step out of the
+       stone-button theme: lit gold while active, dim while off. */
+    .ops button.ops-chip { border:1px solid var(--ops-line); border-image:none;
+      border-radius:999px; background:rgba(255,255,255,.05); background-clip:border-box;
+      color:var(--ops-dim); font-weight:700; text-shadow:none; padding:4px 12px; font-size:12px; }
+    .ops button.ops-chip:hover:not(:disabled), .ops button.ops-chip:focus-visible:not(:disabled) {
+      border-image:none; border-color:rgba(255,255,255,.28);
+      background:rgba(255,255,255,.08); color:var(--ops-fg); text-shadow:none; }
+    .ops button.ops-chip.on { background:rgba(242,199,107,.16);
+      border-color:rgba(242,199,107,.5); color:var(--ops-accent); }
+    .ops-log { background:var(--ops-well); border:1px solid var(--ops-line);
+      border-radius:8px; max-height:420px; overflow:auto; font:12px/1.5 monospace; }
+    .ops-row { display:grid; grid-template-columns:64px 46px 130px 1fr 52px 58px;
+      gap:8px; padding:2px 8px; border-bottom:1px solid rgba(255,255,255,.05); cursor:pointer; }
+    .ops-row:hover { background:rgba(255,255,255,.04); }
+    .ops-row .st { text-align:right; }
+    .ops-row.s2 .st { color:var(--ops-ok); }
+    .ops-row.s3 .st { color:#8fc7ff; }
+    .ops-row.s4 .st { color:var(--ops-warn); }
+    .ops-row.s5 .st { color:var(--ops-bad); }
+    .ops-row.k-honeypot { background:rgba(122,79,180,.18); }
+    .ops-row .p { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ops-row .rep { color:var(--ops-accent); font-weight:bold; }
+    .ops-detail { background:rgba(255,255,255,.04); border:1px solid rgba(242,199,107,.5);
+      border-radius:8px; padding:10px 12px; margin:10px 0; }
+    .ops-detail dl { display:grid; grid-template-columns:150px 1fr; gap:3px 10px; margin:6px 0 0; }
+    .ops-detail dt { color:var(--ops-dim); font-size:11px; }
+    .ops-detail dd { margin:0; font-family:monospace; font-size:12px; word-break:break-all; }
+    .ops-cols { display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); }
+    .ops-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .ops-table th { text-align:left; color:var(--ops-dim); font-weight:normal;
+      font-size:11px; text-transform:uppercase; border-bottom:1px solid var(--ops-line); padding:4px 6px; }
+    .ops-table td { padding:4px 6px; border-bottom:1px solid rgba(255,255,255,.05); font-family:monospace; }
+    .ops-table tr:hover td { background:rgba(255,255,255,.03); }
+    .ops-table .num { text-align:right; }
+    .ops-pill { display:inline-block; padding:1px 6px; border-radius:9px; font-size:10px;
+      font-family:Verdana, sans-serif; border:1px solid var(--ops-line); }
+    .ops-pill.live { border-color:var(--ops-bad); color:var(--ops-bad); }
+    .ops-pill.dry  { border-color:var(--ops-warn); color:var(--ops-warn); }
+    .ops-pill.pin  { border-color:var(--ops-ok); color:var(--ops-ok); }
+    .ops button.ops-act { background:none; background-clip:border-box; border:1px solid var(--ops-line);
+      border-image:none; color:var(--ops-fg); border-radius:6px; cursor:pointer;
+      font-size:11px; font-weight:400; padding:2px 7px; text-shadow:none; }
+    .ops button.ops-act:hover:not(:disabled), .ops button.ops-act:focus-visible:not(:disabled) {
+      border-image:none; background:none; border-color:var(--ops-accent);
+      color:var(--ops-accent); text-shadow:none; }
+    .ops button.ops-act.danger { border-image:none; }
+    .ops button.ops-act.danger:hover:not(:disabled) { border-color:var(--ops-bad); color:var(--ops-bad); filter:none; }
+    .ops-note { color:var(--ops-dim); font-size:11px; margin:6px 0 0; }
+    .ops-empty { color:var(--ops-dim); padding:10px; font-family:Verdana, sans-serif; }
+  </style>
+
+  <!-- ── Overview: health banner, headline numbers, request sparkline ── -->
+  <div class="ops-banner" id="ops-tunnel">Loading…</div>
+  <div class="ops-grid" id="ops-cards"></div>
+  <div class="ops-spark" id="ops-spark" title="Requests per minute. Amber: 404s present. Red: 403s. Purple: honeypot hits."></div>
+  <p class="ops-note" style="margin:0 0 14px">Requests per minute over the last hour. Amber: 404s. Red: 403s. Purple: honeypot hits.</p>
+
+  <!-- ── Traffic ─────────────────────────────────────────────────── -->
+  <section class="group">
+    <p class="grouptitle">Traffic</p>
+
+    <details class="card" open>
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Requests</h2>
+        <span class="muted blurb">Live stream with filters</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <button type="button" id="ops-play" class="ops-chip on">⏸ Pause</button>
+          <button type="button" id="ops-noise" class="ops-chip on">Hide scanners</button>
+          <button type="button" id="ops-collapse" class="ops-chip on">Collapse repeats</button>
+          <select id="ops-status">
+            <option value="">any status</option>
+            <option value="2xx">2xx</option><option value="3xx">3xx</option>
+            <option value="4xx">4xx</option><option value="5xx">5xx</option>
+            <option value="404">404</option><option value="403">403</option>
+          </select>
+          <select id="ops-kind">
+            <option value="">any kind</option>
+            <option value="page">page</option><option value="api">api</option>
+            <option value="asset">asset</option><option value="honeypot">honeypot</option>
+            <option value="untunnel">untunnelled</option><option value="banned">banned</option>
+          </select>
+          <input id="ops-ip" placeholder="ip" size="14">
+          <input id="ops-q" placeholder="regex on path / ip / agent" size="26">
+          <label><input type="checkbox" id="ops-quiet"> quiet journal</label>
+          <button type="button" id="ops-clear">Clear view</button>
+        </div>
+        <div class="ops-log" id="ops-log"><div class="ops-empty">Waiting for requests…</div></div>
+        <div id="ops-detail"></div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Top Talkers</h2>
+        <span class="muted blurb">Busiest IPs, paths, and agents this hour</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-cols">
+          <div class="ops-card"><div class="l">IPs</div>
+            <table class="ops-table"><tbody id="ops-top-ips"></tbody></table></div>
+          <div class="ops-card"><div class="l">Paths</div>
+            <table class="ops-table"><tbody id="ops-top-paths"></tbody></table></div>
+          <div class="ops-card"><div class="l">User agents</div>
+            <table class="ops-table"><tbody id="ops-top-agents"></tbody></table></div>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ── Protection ──────────────────────────────────────────────── -->
+  <section class="group">
+    <p class="grouptitle">Protection</p>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Bans</h2>
+        <span class="muted blurb">Manual bans, review queue, allowlist</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <input id="ops-ban-ip" placeholder="ip to ban" size="18">
+          <input id="ops-ban-min" placeholder="minutes" size="8" value="60">
+          <input id="ops-ban-why" placeholder="reason" size="18">
+          <button type="button" id="ops-ban-go">Ban</button>
+          <span id="ops-ban-mode"></span>
+          <span id="ops-ban-msg" class="ops-note"></span>
+        </div>
+        <div class="ops-cols">
+          <div class="ops-card">
+            <div class="l">Active &amp; recent</div>
+            <table class="ops-table"><thead><tr><th>IP</th><th>Reason</th>
+              <th class="num">Strikes</th><th class="num">Left</th><th></th></tr></thead>
+              <tbody id="ops-ban-rows"></tbody></table>
+          </div>
+          <div class="ops-card">
+            <div class="l">Dry-run review queue</div>
+            <p class="ops-note" id="ops-dry-note"></p>
+            <table class="ops-table"><thead><tr><th>IP</th><th>Path</th><th></th></tr></thead>
+              <tbody id="ops-dry-rows"></tbody></table>
+          </div>
+          <div class="ops-card">
+            <div class="l">Never-ban allowlist</div>
+            <table class="ops-table"><tbody id="ops-never-rows"></tbody></table>
+            <div style="margin-top:6px">
+              <input id="ops-never-ip" placeholder="ip" size="16">
+              <button type="button" class="ops-act" id="ops-never-go">Add</button>
+            </div>
+            <p class="ops-note">Loopback is pinned: cloudflared connects over it, so
+              allowing it to be banned would take the site offline.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Honeypot Paths</h2>
+        <span class="muted blurb">Scanner traps and custom patterns</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <input id="ops-hp-test" placeholder="test a path, e.g. /blog/wp-includes/x" size="40">
+          <button type="button" id="ops-hp-go">Test</button>
+          <span id="ops-hp-out" class="ops-note"></span>
+        </div>
+        <div class="ops-cols">
+          <div class="ops-card">
+            <div class="l">Built in (edit dev_server.py to change)</div>
+            <div id="ops-hp-list" class="ops-note" style="font-family:monospace"></div>
+          </div>
+          <div class="ops-card">
+            <div class="l">Added from this console</div>
+            <table class="ops-table"><tbody id="ops-hp-custom"></tbody></table>
+            <div style="margin-top:6px">
+              <input id="ops-hp-new" placeholder="/new-scanner-path" size="22">
+              <button type="button" class="ops-act" id="ops-hp-add">Add</button>
+            </div>
+            <p class="ops-note" id="ops-hp-addmsg">Patterns that overlap paths this
+              viewer serves are refused. Built-ins are checked first, so a custom
+              entry can never mask one.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Rate-Limit Buckets</h2>
+        <span class="muted blurb">Active token buckets</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <span id="ops-buk-sum" class="ops-note"></span>
+          <button type="button" id="ops-buk-refresh">Refresh</button>
+        </div>
+        <div class="ops-card">
+          <table class="ops-table"><thead><tr><th>Key</th><th>Kind</th>
+            <th class="num">Tokens</th><th class="num">Headroom</th>
+            <th class="num">Idle</th><th></th></tr></thead>
+            <tbody id="ops-buk-rows"></tbody></table>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ── Server ──────────────────────────────────────────────────── -->
+  <section class="group">
+    <p class="grouptitle">Server</p>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Sessions &amp; Token Cache</h2>
+        <span class="muted blurb">Cached sign-ins; revoke by user</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <input id="ops-rev-user" placeholder="revoke by username" size="18">
+          <button type="button" id="ops-rev-go">Drop cache entries</button>
+          <span id="ops-rev-msg" class="ops-note"></span>
+        </div>
+        <div class="ops-cols">
+          <div class="ops-card">
+            <div class="l">Cached tokens</div>
+            <table class="ops-table"><thead><tr><th>Handle</th><th>User</th>
+              <th class="num">Expires</th><th></th></tr></thead>
+              <tbody id="ops-sess-rows"></tbody></table>
+            <p class="ops-note" id="ops-sess-note"></p>
+          </div>
+          <div class="ops-card">
+            <div class="l">Tokens per user</div>
+            <table class="ops-table"><tbody id="ops-sess-users"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Settings</h2>
+        <span class="muted blurb">Runtime server settings</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <input id="ops-set-filter" placeholder="filter settings" size="20">
+          <button type="button" id="ops-set-save" disabled>Save 0 changes</button>
+          <button type="button" id="ops-set-reset">Revert edits</button>
+          <span id="ops-set-msg" class="ops-note"></span>
+        </div>
+        <div class="ops-card">
+          <table class="ops-table"><thead><tr><th>Setting</th><th class="num">Value</th>
+            <th class="num">Range</th><th class="num">Default</th><th>Pending</th></tr></thead>
+            <tbody id="ops-set-rows"></tbody></table>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ── Audit ───────────────────────────────────────────────────── -->
+  <section class="group">
+    <p class="grouptitle">Audit</p>
+
+    <details class="card">
+      <summary>
+        <span class="chev">&#9656;</span>
+        <h2>Audit Log</h2>
+        <span class="muted blurb">Server-side administrative actions</span>
+      </summary>
+      <div class="cardbody">
+        <div class="ops-bar">
+          <input id="ops-aud-admin" placeholder="admin" size="12">
+          <select id="ops-aud-action"><option value="">any action</option></select>
+          <input id="ops-aud-q" placeholder="search all fields" size="24">
+          <button type="button" id="ops-aud-csv">Export CSV</button>
+          <span id="ops-aud-sum" class="ops-note"></span>
+        </div>
+        <div class="ops-log" id="ops-aud-out" style="max-height:260px"></div>
+      </div>
+    </details>
+  </section>
+</section>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // Auth is the X-Viewer-Token header. There is no cookie anywhere in this
+  // server, which is also why the live feed polls instead of using
+  // EventSource - EventSource cannot set a header, and putting the token in a
+  // query string would write it into the very log this page displays.
+  const token = () =>
+    (window.VIEWER_TOKEN || localStorage.getItem("bym.token") || "").trim();
+
+  async function api(path, options) {
+    const response = await fetch("/api/admin/ops" + path, Object.assign({
+      headers: {
+        "X-Viewer-Token": token(),
+        "Content-Type": "application/json",
+        "X-Fetch-Priority": "9",
+      },
+    }, options || {}));
+    const text = await response.text();
+    let body = {};
+    try { body = text ? JSON.parse(text) : {}; } catch (_) { body = { error: text }; }
+    if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
+    return body;
+  }
+
+  // ---- 1-5 the request stream -----------------------------------------
+  const state = {
+    cursor: 0, rows: [], playing: true, hideNoise: true, collapse: true,
+    selected: null, timer: null,
+  };
+  const MAX_ROWS = 1200;
+
+  const filters = () => {
+    const params = new URLSearchParams();
+    params.set("since", String(state.cursor));
+    params.set("hideNoise", state.hideNoise ? "1" : "0");
+    if ($("ops-status").value) params.set("status", $("ops-status").value);
+    if ($("ops-kind").value) params.set("kind", $("ops-kind").value);
+    if ($("ops-ip").value.trim()) params.set("ip", $("ops-ip").value.trim());
+    if ($("ops-q").value.trim()) params.set("q", $("ops-q").value.trim());
+    return params.toString();
+  };
+
+  const clockOf = (at) => new Date(at * 1000).toISOString().substr(11, 8);
+
+  /* 2. Collapse repeats. Consecutive identical method+path+status+ip becomes
+     one row with a count, which is what turns 400 wlwmanifest probes into a
+     single line. Non-adjacent repeats stay separate so the timeline stays
+     honest about when things happened. */
+  function collapsed(rows) {
+    if (!state.collapse) return rows.map((r) => ({ r, n: 1 }));
+    const out = [];
+    for (const r of rows) {
+      const last = out[out.length - 1];
+      if (last && last.r.ip === r.ip && last.r.path === r.path
+          && last.r.method === r.method && last.r.status === r.status) {
+        last.n += 1;
+        last.r = r;                 // keep the newest timestamp
+      } else {
+        out.push({ r, n: 1 });
+      }
+    }
+    return out;
+  }
+
+  function renderLog() {
+    const log = $("ops-log");
+    if (!state.rows.length) {
+      log.innerHTML = '<div class="ops-empty">No requests match the current filters.</div>';
+      return;
+    }
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    log.innerHTML = collapsed(state.rows).map(({ r, n }) => `
+      <div class="ops-row s${String(r.status)[0]} k-${esc(r.kind)}" data-id="${r.id}">
+        <span>${clockOf(r.at)}</span>
+        <span>${esc(r.method)}</span>
+        <span>${esc(r.ip)}</span>
+        <span class="p">${esc(r.path)}${n > 1 ? ` <span class="rep">x${n}</span>` : ""}</span>
+        <span class="st">${r.status}</span>
+        <span class="st">${Math.round(r.ms)}ms</span>
+      </div>`).join("");
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  // 5. detail drawer - shows the two facts that made the 127.0.0.1 question
+  // hard to answer: the socket peer's resolved address, and whether the
+  // Cloudflare header was present at all.
+  function renderDetail(row) {
+    if (!row) { $("ops-detail").innerHTML = ""; return; }
+    $("ops-detail").innerHTML = `
+      <div class="ops-detail">
+        <b>${esc(row.method)} ${esc(row.path)}</b> &rarr; ${row.status}
+        <dl>
+          <dt>time</dt><dd>${new Date(row.at * 1000).toISOString()}</dd>
+          <dt>resolved client IP</dt><dd>${esc(row.ip)}</dd>
+          <dt>came via tunnel</dt><dd>${row.tunnel
+            ? "yes - CF-Connecting-IP was present"
+            : "NO - no CF-Connecting-IP, so this did not cross Cloudflare"}</dd>
+          <dt>classified as</dt><dd>${esc(row.kind)}</dd>
+          <dt>duration</dt><dd>${row.ms} ms</dd>
+          <dt>response bytes</dt><dd>${row.bytes}</dd>
+          <dt>fetch priority</dt><dd>${row.priority || "-"}</dd>
+          <dt>user agent</dt><dd>${esc(row.agent) || "-"}</dd>
+        </dl>
+        <div style="margin-top:8px">
+          <button class="ops-act danger" data-ban="${esc(row.ip)}">Ban this IP</button>
+          <button class="ops-act" data-never="${esc(row.ip)}">Never ban it</button>
+          <button class="ops-act" data-filter="${esc(row.ip)}">Filter to it</button>
+        </div>
+      </div>`;
+  }
+
+  async function poll() {
+    if (!state.playing) return;
+    try {
+      const data = await api("/requests?" + filters());
+      if (data.requests.length) {
+        state.cursor = data.cursor;
+        state.rows = state.rows.concat(data.requests).slice(-MAX_ROWS);
+        renderLog();
+      }
+      $("ops-quiet").checked = !!data.quiet;
+    } catch (error) {
+      $("ops-log").innerHTML =
+        '<div class="ops-empty">Feed error: ' + esc(error.message) + "</div>";
+    }
+  }
+
+  // ---- 6/13/14 banner, cards, sparkline, top talkers -------------------
+  async function refreshStats() {
+    let data;
+    try { data = await api("/stats?window=3600"); }
+    catch (error) {
+      $("ops-tunnel").className = "ops-banner bad";
+      $("ops-tunnel").innerHTML = "Stats unavailable: " + esc(error.message);
+      return;
+    }
+    const t = data.totals, tun = data.tunnel;
+
+    // 6. tunnel health. Bound to anything but loopback is the finding that
+    // matters most here, so it gets the loudest treatment.
+    const problems = [];
+    if (!tun.boundToLoopback) {
+      problems.push(`<b>HOST is ${esc(tun.host)}</b>, not 127.0.0.1 - this server is
+        reachable directly, which bypasses the tunnel and makes CF-Connecting-IP
+        spoofable. Set HOST=127.0.0.1.`);
+    }
+    if (tun.untunnelled) {
+      problems.push(`<b>${tun.untunnelled}</b> request(s) in the last hour arrived
+        without CF-Connecting-IP - refused, but they were made locally rather
+        than through cloudflared.`);
+    }
+    $("ops-tunnel").className = "ops-banner " + (problems.length ? "bad" : "ok");
+    $("ops-tunnel").innerHTML = problems.length
+      ? problems.join("<br>")
+      : `Tunnel healthy - bound to <b>${esc(tun.host)}</b>, every request in the
+         last hour carried CF-Connecting-IP.`;
+
+    const cards = [
+      ["requests / hr", t.requests, ""],
+      ["avg latency", t.avgMs + " ms", ""],
+      ["404s", t.notFound, t.notFound ? "warn" : ""],
+      ["403s refused", t.forbidden, ""],
+      ["scanner hits", t.honeypot, t.honeypot ? "scan" : ""],
+      ["5xx", t.errors, t.errors ? "bad" : ""],
+      ["bans active", data.bans.active,
+        data.bans.enforcing ? "" : "warn"],
+      ["retained rows", t.retained, ""],
+    ];
+    $("ops-cards").innerHTML = cards.map(([label, value, tone]) => `
+      <div class="ops-card">
+        <div class="n" style="${tone === "bad" ? "color:var(--ops-bad)"
+          : tone === "warn" ? "color:var(--ops-warn)"
+          : tone === "scan" ? "color:var(--ops-scan)" : ""}">${esc(value)}</div>
+        <div class="l">${esc(label)}</div>
+      </div>`).join("")
+      + (t.dropped ? `<div class="ops-card"><div class="n" style="color:var(--ops-bad)">
+          ${t.dropped}</div><div class="l">dropped (buffer full)</div></div>` : "");
+
+    // 13. sparkline, with 404/403/scanner minutes coloured rather than drawn
+    // as separate series - one bar per minute stays readable at 60 bars.
+    const s = data.series;
+    const peak = Math.max(1, ...s.all);
+    $("ops-spark").innerHTML = s.all.map((n, i) => {
+      const cls = s.honeypot[i] ? "hasScan" : s.s403[i] ? "has403"
+        : s.s404[i] ? "has404" : "";
+      return `<i class="${cls}" style="height:${Math.max(2, (n / peak) * 100)}%"
+        title="${n} req, ${s.s404[i]} 404, ${s.s403[i]} 403, ${s.honeypot[i]} scan"></i>`;
+    }).join("");
+
+    $("ops-top-ips").innerHTML = data.topIps.map((r) => `
+      <tr><td>${esc(r.ip)}</td><td class="num">${r.count}</td>
+      <td>${r.honeypot ? '<span class="ops-pill dry">' + r.honeypot + ' scan</span>' : ""}</td>
+      <td><button class="ops-act danger" data-ban="${esc(r.ip)}">ban</button></td></tr>`
+    ).join("") || '<tr><td class="ops-empty">nothing yet</td></tr>';
+    $("ops-top-paths").innerHTML = data.topPaths.map((r) => `
+      <tr><td>${esc(r.path.slice(0, 60))}</td><td class="num">${r.count}</td></tr>`
+    ).join("") || '<tr><td class="ops-empty">nothing yet</td></tr>';
+    $("ops-top-agents").innerHTML = data.topAgents.map((r) => `
+      <tr><td>${esc(r.agent.slice(0, 58))}</td><td class="num">${r.count}</td></tr>`
+    ).join("") || '<tr><td class="ops-empty">nothing yet</td></tr>';
+  }
+
+  // ---- 7-12 bans -------------------------------------------------------
+  const mins = (seconds) => {
+    if (seconds <= 0) return "-";
+    const m = Math.round(seconds / 60);
+    return m < 60 ? m + "m" : Math.floor(m / 60) + "h" + (m % 60 ? (m % 60) + "m" : "");
+  };
+
+  async function refreshBans() {
+    let data;
+    try { data = await api("/bans"); } catch (_) { return; }
+
+    $("ops-ban-mode").innerHTML = data.enforcing
+      ? '<span class="ops-pill live">enforcing</span>'
+      : '<span class="ops-pill dry">dry run - nothing is blocked</span>';
+
+    $("ops-ban-rows").innerHTML = data.bans.map((b) => `
+      <tr><td>${esc(b.ip)}</td><td>${esc(b.reason)}</td>
+        <td class="num">${b.strikes}</td>
+        <td class="num">${b.active ? mins(b.remaining) : "expired"}</td>
+        <td><button class="ops-act" data-unban="${esc(b.ip)}">unban</button></td></tr>`
+    ).join("") || '<tr><td class="ops-empty">no bans</td></tr>';
+
+    // 8. Dry-run review queue: what WOULD have been banned. Approving turns
+    // the recorded hit into a real ban; "never" pins the IP to the allowlist.
+    // This is the safe path to switching honeypotBansEnabled on.
+    const pending = data.history.filter((h) => !h.enforced);
+    $("ops-dry-note").textContent = data.enforcing
+      ? "Bans are live. This list is history from while dry run was on."
+      : "Bans are OFF. Review these, then set honeypotBansEnabled to 1.";
+    $("ops-dry-rows").innerHTML = pending.slice(0, 40).map((h) => `
+      <tr><td>${esc(h.ip)}</td><td>${esc(String(h.path).slice(0, 34))}</td>
+        <td><button class="ops-act danger" data-ban="${esc(h.ip)}">ban</button>
+            <button class="ops-act" data-never="${esc(h.ip)}">never</button></td></tr>`
+    ).join("") || '<tr><td class="ops-empty">nothing caught yet</td></tr>';
+
+    // 12. Allowlist, loopback visibly pinned rather than merely documented.
+    const pinned = ["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"];
+    $("ops-never-rows").innerHTML = data.neverBan.map((ip) => `
+      <tr><td>${esc(ip)}</td><td>${pinned.includes(ip)
+        ? '<span class="ops-pill pin">pinned</span>'
+        : '<button class="ops-act" data-allow="' + esc(ip) + '">remove</button>'}</td></tr>`
+    ).join("");
+  }
+
+  async function banAction(action, ip, extra) {
+    const message = $("ops-ban-msg");
+    try {
+      await api("/bans", {
+        method: "POST",
+        body: JSON.stringify(Object.assign({ action, ip }, extra || {})),
+      });
+      message.textContent = action + " " + ip + " ok";
+      message.style.color = "var(--ops-ok)";
+    } catch (error) {
+      message.textContent = error.message;
+      message.style.color = "var(--ops-bad)";
+    }
+    refreshBans();
+    refreshStats();
+  }
+
+  // ---- 11 honeypot list, editor and tester -----------------------------
+  async function refreshHoneypots() {
+    try {
+      const data = await api("/honeypots");
+      $("ops-hp-list").textContent =
+        data.prefixes.join("  ") + "   " + data.exact.join("  ");
+      $("ops-hp-custom").innerHTML = (data.custom || []).map((p) => `
+        <tr><td>${esc(p)}</td>
+        <td><button class="ops-act" data-hprm="${esc(p)}">remove</button></td></tr>`
+      ).join("") || '<tr><td class="ops-empty">none added</td></tr>';
+    } catch (_) { /* non-fatal */ }
+  }
+
+  async function honeypotEdit(endpoint, pattern) {
+    const message = $("ops-hp-addmsg");
+    try {
+      const data = await api(endpoint, {
+        method: "POST", body: JSON.stringify({ pattern }),
+      });
+      message.textContent = data.message || ("removed " + pattern);
+      message.style.color = "var(--ops-ok)";
+      $("ops-hp-new").value = "";
+    } catch (error) {
+      message.textContent = error.message;
+      message.style.color = "var(--ops-bad)";
+    }
+    refreshHoneypots();
+  }
+
+  // ---- 15 rate-limit buckets -------------------------------------------
+  async function refreshBuckets() {
+    let data;
+    try { data = await api("/buckets"); } catch (_) { return; }
+    const L = data.limits;
+    $("ops-buk-sum").textContent =
+      `${data.total} live bucket(s). Signed-in: ${L.userPerMin}/min burst ` +
+      `${L.userBurst}. Anonymous: ${L.ipPerMin}/min burst ${L.ipBurst}. ` +
+      `Forgotten after ${data.idleCutoff}s idle.`;
+    $("ops-buk-rows").innerHTML = data.buckets.map((b) => {
+      // Low headroom is the thing worth seeing at a glance; a loopback-keyed
+      // bucket means the tunnel is being counted as one client, so it is
+      // called out explicitly rather than left to be noticed.
+      const tone = b.headroom < 20 ? "var(--ops-bad)"
+        : b.headroom < 50 ? "var(--ops-warn)" : "var(--ops-ok)";
+      return `<tr><td>${esc(b.key)}${b.suspicious
+          ? ' <span class="ops-pill dry">loopback-keyed</span>' : ""}</td>
+        <td>${esc(b.kind)}</td>
+        <td class="num">${b.tokens}</td>
+        <td class="num" style="color:${tone}">${b.headroom}%</td>
+        <td class="num">${b.idleSeconds}s</td>
+        <td>${b.kind === "ip" && !b.suspicious
+          ? '<button class="ops-act danger" data-ban="' +
+            esc(b.key.slice(3)) + '">ban</button>' : ""}</td></tr>`;
+    }).join("") || '<tr><td class="ops-empty">no active buckets</td></tr>';
+  }
+
+  // ---- 17/33 sessions --------------------------------------------------
+  async function refreshSessions() {
+    let data;
+    try { data = await api("/sessions"); } catch (_) { return; }
+    $("ops-sess-note").textContent = data.note + " Cache TTL " + data.ttl + "s.";
+    $("ops-sess-rows").innerHTML = data.sessions.map((s) => `
+      <tr><td>${esc(s.handle)}…</td><td>${esc(s.user)}</td>
+        <td class="num" style="${s.live ? "" : "color:var(--ops-dim)"}">${
+          s.live ? mins(s.expiresIn) : "expired"}</td>
+        <td><button class="ops-act" data-revoke="${esc(s.handle)}">drop</button></td></tr>`
+    ).join("") || '<tr><td class="ops-empty">no cached tokens</td></tr>';
+    $("ops-sess-users").innerHTML = data.users.map((u) => `
+      <tr><td>${esc(u.user)}</td><td class="num">${u.tokens}</td>
+      <td><button class="ops-act" data-revuser="${esc(u.user)}">drop all</button></td></tr>`
+    ).join("") || '<tr><td class="ops-empty">nobody signed in</td></tr>';
+  }
+
+  async function revoke(payload) {
+    const message = $("ops-rev-msg");
+    try {
+      const data = await api("/revoke", {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      message.textContent = data.dropped + " dropped. " + data.note;
+      message.style.color = "var(--ops-dim)";
+    } catch (error) {
+      message.textContent = error.message;
+      message.style.color = "var(--ops-bad)";
+    }
+    refreshSessions();
+  }
+
+  // ---- 16/22 settings --------------------------------------------------
+  // Every field comes from SETTINGS_FIELD_RULES, so min/max validation is the
+  // server's own and new settings appear here without touching this file.
+  const settings = { values: {}, rules: {}, pending: {} };
+
+  function renderSettings() {
+    const needle = $("ops-set-filter").value.trim().toLowerCase();
+    const names = Object.keys(settings.rules).filter(
+      (f) => !needle || f.toLowerCase().includes(needle)).sort();
+    $("ops-set-rows").innerHTML = names.map((field) => {
+      const rule = settings.rules[field];
+      const live = settings.values[field];
+      const draft = settings.pending[field];
+      const changed = draft !== undefined && Number(draft) !== Number(live);
+      return `<tr><td>${esc(field)}</td>
+        <td class="num"><input data-set="${esc(field)}" value="${
+          draft !== undefined ? esc(draft) : esc(live)}" size="8"
+          style="width:70px;background:#0e1116;color:${
+            changed ? "var(--ops-accent)" : "var(--ops-fg)"};
+            border:1px solid ${changed ? "var(--ops-accent)" : "var(--ops-line)"};
+            border-radius:3px;padding:2px 4px;font:12px monospace"></td>
+        <td class="num" style="color:var(--ops-dim)">${rule.min}–${rule.max}</td>
+        <td class="num" style="color:var(--ops-dim)">${rule.default}</td>
+        <td>${changed ? `<span class="ops-pill dry">${esc(live)} → ${esc(draft)}</span>` : ""}</td>
+      </tr>`;
+    }).join("");
+    const count = Object.keys(settings.pending).filter(
+      (f) => Number(settings.pending[f]) !== Number(settings.values[f])).length;
+    $("ops-set-save").textContent = "Save " + count + " change" + (count === 1 ? "" : "s");
+    $("ops-set-save").disabled = count === 0;
+  }
+
+  async function refreshSettings() {
+    try {
+      // The general admin settings API already covers every field, so the
+      // console reads it rather than adding a second source of truth.
+      const response = await fetch("/api/admin/settings",
+        { headers: { "X-Viewer-Token": token() } });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "settings unavailable");
+      settings.values = data.values;
+      settings.rules = data.rules;
+      renderSettings();
+    } catch (error) { $("ops-set-msg").textContent = error.message; }
+  }
+
+  async function saveSettings() {
+    const body = {};
+    for (const field of Object.keys(settings.pending)) {
+      if (Number(settings.pending[field]) !== Number(settings.values[field])) {
+        body[field] = Number(settings.pending[field]);
+      }
+    }
+    try {
+      const response = await fetch("/api/admin/settings", {
+        method: "POST",
+        headers: { "X-Viewer-Token": token(), "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "rejected");
+      settings.values = data.values;
+      settings.pending = {};
+      $("ops-set-msg").textContent = "Saved.";
+      $("ops-set-msg").style.color = "var(--ops-ok)";
+      renderSettings();
+      refreshBans();
+      refreshStats();
+    } catch (error) {
+      $("ops-set-msg").textContent = error.message;
+      $("ops-set-msg").style.color = "var(--ops-bad)";
+    }
+  }
+
+  // ---- 23 audit log ----------------------------------------------------
+  async function refreshAudit() {
+    const params = new URLSearchParams();
+    if ($("ops-aud-admin").value.trim()) params.set("admin", $("ops-aud-admin").value.trim());
+    if ($("ops-aud-action").value) params.set("action", $("ops-aud-action").value);
+    if ($("ops-aud-q").value.trim()) params.set("q", $("ops-aud-q").value.trim());
+    let data;
+    try { data = await api("/audit?" + params.toString()); } catch (_) { return; }
+    $("ops-aud-sum").textContent =
+      `${data.matched} of ${data.total} entries` +
+      (data.matched > data.audit.length ? ` (showing ${data.audit.length})` : "");
+    // The action dropdown is built from the unfiltered log, so narrowing by
+    // one action never hides the others.
+    const chooser = $("ops-aud-action");
+    if (chooser.options.length - 1 !== data.actions.length) {
+      const current = chooser.value;
+      chooser.innerHTML = '<option value="">any action</option>'
+        + data.actions.map((a) => `<option>${esc(a)}</option>`).join("");
+      chooser.value = current;
+    }
+    $("ops-aud-out").innerHTML = data.audit.map((e) => `
+      <div class="ops-row" style="grid-template-columns:150px 110px 150px 1fr">
+        <span>${esc(String(e.at || "").replace("T", " ").replace("+00:00", ""))}</span>
+        <span>${esc(e.admin || "?")}</span>
+        <span style="color:var(--ops-accent)">${esc(e.action || "")}</span>
+        <span class="p" title="${esc(e.detail || "")}">${esc(e.detail || "")}</span>
+      </div>`).join("") || '<div class="ops-empty">no matching entries</div>';
+  }
+
+  // ---- wiring ----------------------------------------------------------
+  $("ops-play").addEventListener("click", () => {
+    state.playing = !state.playing;
+    $("ops-play").textContent = state.playing ? "⏸ Pause" : "▶ Resume";
+    $("ops-play").classList.toggle("on", state.playing);
+    if (state.playing) poll();
+  });
+  const resetFeed = () => { state.cursor = 0; state.rows = []; renderLog(); poll(); };
+  $("ops-noise").addEventListener("click", () => {
+    state.hideNoise = !state.hideNoise;
+    $("ops-noise").classList.toggle("on", state.hideNoise);
+    $("ops-noise").textContent = state.hideNoise ? "Hide scanners" : "Showing scanners";
+    resetFeed();
+  });
+  $("ops-collapse").addEventListener("click", () => {
+    state.collapse = !state.collapse;
+    $("ops-collapse").classList.toggle("on", state.collapse);
+    renderLog();
+  });
+  ["ops-status", "ops-kind"].forEach((id) =>
+    $(id).addEventListener("change", resetFeed));
+  let debounce = null;
+  ["ops-ip", "ops-q"].forEach((id) => $(id).addEventListener("input", () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(resetFeed, 350);
+  }));
+  $("ops-clear").addEventListener("click", () => { state.rows = []; renderLog(); });
+  $("ops-quiet").addEventListener("change", () =>
+    api("/quiet", { method: "POST", body: JSON.stringify({ quiet: $("ops-quiet").checked }) })
+      .catch(() => {}));
+
+  $("ops-log").addEventListener("click", (event) => {
+    const row = event.target.closest(".ops-row");
+    if (!row) return;
+    const id = Number(row.dataset.id);
+    state.selected = state.rows.find((r) => r.id === id) || null;
+    renderDetail(state.selected);
+  });
+
+  // 10. Ban straight from a log row, a top-talker row, a bucket row or the
+  // review queue - one delegated handler covers all of them, and the M2
+  // panels' actions ride along the same path.
+  document.getElementById("ops-root").addEventListener("click", (event) => {
+    const target = event.target;
+    if (target.dataset.ban) {
+      banAction("ban", target.dataset.ban,
+        { minutes: Number($("ops-ban-min").value) || 60, reason: "from console" });
+    } else if (target.dataset.unban) {
+      banAction("unban", target.dataset.unban);
+    } else if (target.dataset.never) {
+      banAction("never-ban", target.dataset.never);
+    } else if (target.dataset.allow) {
+      banAction("allow-bans", target.dataset.allow);
+    } else if (target.dataset.filter) {
+      $("ops-ip").value = target.dataset.filter;
+      resetFeed();
+    } else if (target.dataset.hprm) {
+      honeypotEdit("/honeypot-remove", target.dataset.hprm);
+    } else if (target.dataset.revoke) {
+      revoke({ handle: target.dataset.revoke });
+    } else if (target.dataset.revuser) {
+      revoke({ user: target.dataset.revuser });
+    }
+  });
+
+  // Settings inputs are read on change rather than per keystroke so a partly
+  // typed number never counts as a pending edit.
+  $("ops-set-rows").addEventListener("change", (event) => {
+    const field = event.target.dataset.set;
+    if (!field) return;
+    settings.pending[field] = event.target.value.trim();
+    renderSettings();
+  });
+  $("ops-set-filter").addEventListener("input", renderSettings);
+  $("ops-set-save").addEventListener("click", saveSettings);
+  $("ops-set-reset").addEventListener("click", () => {
+    settings.pending = {};
+    $("ops-set-msg").textContent = "";
+    renderSettings();
+  });
+
+  let auditDebounce = null;
+  ["ops-aud-admin", "ops-aud-q"].forEach((id) => $(id).addEventListener("input", () => {
+    clearTimeout(auditDebounce);
+    auditDebounce = setTimeout(refreshAudit, 300);
+  }));
+  $("ops-aud-action").addEventListener("change", refreshAudit);
+  $("ops-aud-csv").addEventListener("click", async () => {
+    // Fetched with the auth header, then handed to the browser as a blob -
+    // a plain link cannot carry X-Viewer-Token.
+    const params = new URLSearchParams({ format: "csv" });
+    if ($("ops-aud-admin").value.trim()) params.set("admin", $("ops-aud-admin").value.trim());
+    if ($("ops-aud-action").value) params.set("action", $("ops-aud-action").value);
+    if ($("ops-aud-q").value.trim()) params.set("q", $("ops-aud-q").value.trim());
+    const response = await fetch("/api/admin/ops/audit?" + params.toString(),
+      { headers: { "X-Viewer-Token": token() } });
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "audit.csv";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
+
+  $("ops-buk-refresh").addEventListener("click", refreshBuckets);
+  $("ops-rev-go").addEventListener("click", () =>
+    revoke({ user: $("ops-rev-user").value.trim() }));
+  $("ops-hp-add").addEventListener("click", () =>
+    honeypotEdit("/honeypot-add", $("ops-hp-new").value.trim()));
+  $("ops-ban-go").addEventListener("click", () =>
+    banAction("ban", $("ops-ban-ip").value.trim(), {
+      minutes: Number($("ops-ban-min").value) || 60,
+      reason: $("ops-ban-why").value.trim() || "manual",
+    }));
+  $("ops-never-go").addEventListener("click", () =>
+    banAction("never-ban", $("ops-never-ip").value.trim()));
+
+  $("ops-hp-go").addEventListener("click", async () => {
+    const path = $("ops-hp-test").value.trim();
+    if (!path) return;
+    try {
+      const data = await api("/honeypot-test", {
+        method: "POST", body: JSON.stringify({ paths: [path] }),
+      });
+      const hit = data.results[0].match;
+      $("ops-hp-out").textContent = hit
+        ? "MATCHES - this path would trigger a ban"
+        : "no match - this path is served normally";
+      $("ops-hp-out").style.color = hit ? "var(--ops-bad)" : "var(--ops-ok)";
+    } catch (error) { $("ops-hp-out").textContent = error.message; }
+  });
+
+  poll();
+  refreshStats();
+  refreshBans();
+  refreshHoneypots();
+  refreshBuckets();
+  refreshSessions();
+  refreshSettings();
+  refreshAudit();
+  state.timer = setInterval(poll, 1000);
+  setInterval(refreshStats, 10000);
+  setInterval(refreshBans, 5000);
+  // Buckets and sessions move slowly and cost a lock each, so they refresh
+  // less often than the request feed.
+  setInterval(refreshBuckets, 8000);
+  setInterval(refreshSessions, 15000);
+  setInterval(refreshAudit, 20000);
+})();
+</script>

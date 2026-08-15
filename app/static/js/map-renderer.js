@@ -2,6 +2,31 @@ import {
   ASSET_PATHS,
   CELL_HEX_EDGES,
   CELL_HEX_VERTICES,
+  CELL_ART_BOUNDS,
+  CELL_ART_PLACEMENT,
+  MAPROOM_UI,
+  MCBG_ASPECT,
+  MC_PLAYER_ANCHOR,
+  NAME_BAR,
+  NAME_BAR_COLOURS,
+  NAME_BAR_CONTRAST_THRESHOLD,
+  NAME_BAR_EMPTY_DARKEN,
+  NAME_BAR_MAX_DISPLAY_DAMAGE,
+  NAME_BAR_OUTLINE,
+  NAME_TEXT,
+  LEVEL_PLACEMENT,
+  PROTECTION_BOUNDS,
+  PROTECTION_PLACEMENT,
+  TERRAIN_BANDS,
+  TERRAIN_TILE_PATH,
+  TERRAIN_TILE_W,
+  TERRAIN_TILE_H,
+  WATER_SURFACE_FILL,
+  cellLift,
+  colourDistance,
+  darkenHex,
+  terrainFrameFor,
+  waterSurfaceLift,
   MR2,
   cellKey,
   formatCompactNumber,
@@ -12,7 +37,10 @@ import {
   createEmptyRendererBaseFilter,
   cubeToOffset,
   getFlingerRange,
+  generatedWildCell,
   getHexDistance,
+  getOutpostKitKey,
+  getOutpostKitSuffix,
   getTerrainBand,
   getTribeKey,
   isCollinear,
@@ -38,31 +66,55 @@ const LABEL_RENDER_ZOOM_MIN = 0.42;const DEFAULT_MAP_ZOOM = 0.7;
 // Loot label per-resource styling. r1..r4 are the BYM resources in canonical
 // order (Twigs, Pebbles, Putty, Goo); "total" sums them (getCellLootTotal).
 const LOOT_RESOURCE_STYLES = {
+  tier: { label: "Loot percentile", color: "#ffd97a" },
   total: { label: "Loot", color: "#ffd97a" },
   r1: { label: "Twigs", color: "#e6c98a" },
   r2: { label: "Pebbles", color: "#a9c2d6" },
   r3: { label: "Putty", color: "#e3a6d4" },
   r4: { label: "Goo", color: "#8fd6a0" },
 };
-const LOOT_RESOURCE_KEYS = ["total", "r1", "r2", "r3", "r4"];
-const MIN_ZOOM = 0.08;
+const LOOT_RESOURCE_KEYS = ["tier", "total", "r1", "r2", "r3", "r4"];
+/**
+ * The zoom ladder.
+ *
+ * One wheel notch multiplies zoom by WHEEL_ZOOM_MULTIPLIER, so the reachable
+ * zooms form a geometric ladder. Step 1 is fully zoomed in (MAX_ZOOM) and each
+ * step out divides by the ratio:
+ *
+ *   zoomForStep(n) = MAX_ZOOM / ratio^(n - 1)
+ *
+ * The old range (1.5 down to 0.08) was 23 steps, which is what a scroll from
+ * one end to the other counted. ZOOM_STEPS extends that to 29, putting the
+ * far end at ~0.038 - a little over twice as far out as before - and MIN_ZOOM
+ * is derived from it so the bottom of the range always lands exactly on a
+ * step instead of part-way between two.
+ */
+const ZOOM_STEPS = 29;
+const SIMPLE_VIEW_FROM_STEP = 10;
 // Below this zoom the renderer switches to a simplified level-of-detail:
 // terrain as rectangles and bases as markers, so deep zoom-out stays smooth.
-const LOD_SIMPLE_ZOOM = 0.16;
 
-// Group color scheme:
-//  - allies: bright blue with a green tint (cyan-teal)
-//  - enemy mains: bright red; enemy outposts: dark red
-//  - neutral player outposts: yellow; own bases: blue
-//  - every main yard gets a purple halo outline
+// Marker colours for the simplified far-zoom view. The full layout carries
+// the same relationships on the name bar instead.
 const ALLY_STROKE = "rgba(52, 214, 236, 0.95)";
-const ALLY_FILL = "rgba(52, 214, 236, 0.16)";
 const ENEMY_STROKE = "rgba(255, 92, 74, 0.95)";
-const ENEMY_FILL = "rgba(255, 92, 74, 0.14)";
-const ENEMY_OUTPOST_STROKE = "rgba(150, 26, 18, 0.95)";
-const ENEMY_OUTPOST_FILL = "rgba(150, 26, 18, 0.22)";
-const MAIN_OUTLINE_COLOR = "rgba(178, 102, 255, 0.9)";
 const MAX_ZOOM = 1.5;
+const MIN_ZOOM = MAX_ZOOM / (WHEEL_ZOOM_MULTIPLIER ** (ZOOM_STEPS - 1));
+
+/** The zoom at a given ladder step (1 = fully zoomed in). */
+function zoomForStep(step) {
+  return MAX_ZOOM / (WHEEL_ZOOM_MULTIPLIER ** (step - 1));
+}
+
+/** Ladder step for an arbitrary zoom, which pinch and fit-to-view produce. */
+function zoomStepFor(zoom) {
+  return 1 + Math.log(MAX_ZOOM / zoom) / Math.log(WHEEL_ZOOM_MULTIPLIER);
+}
+
+// Steps 1..9 draw the full layout; 10 and beyond switch to the simplified
+// view. The threshold is the geometric midpoint between steps 9 and 10, so a
+// zoom landing exactly on a step is never ambiguous.
+const LOD_SIMPLE_ZOOM = zoomForStep(SIMPLE_VIEW_FROM_STEP) * Math.sqrt(WHEEL_ZOOM_MULTIPLIER);
 const FETCH_DEBOUNCE_MS = 160;
 
 // Mirrors the server's persist-side minification (CELL_DROP_KEYS in
@@ -76,7 +128,25 @@ const FETCH_DEBOUNCE_MS = 160;
 // ever carried a base id. A zone fetched live this session had one; the same
 // zone restored from cache did not, which is why anything counting or opening
 // bases from cached cells behaved inconsistently.
-const CELL_CACHE_DROP_KEYS = new Set(["m", "mine", "blendedHeight"]);
+// Floor between two forced zone reloads of the SAME zone (base-view opens).
+// Matches the force path in refetchZones; a base id cannot go stale faster.
+const ZONE_RELOAD_MIN_AGE_MS = 15 * 1000;
+
+// Above this many changed cells, rebuilding the world bitmap outright beats
+// patching them one at a time.
+const WORLD_BITMAP_PATCH_LIMIT = 20000;
+
+// Rows to probe either side when hit-testing. Relief shifts a cell's drawn
+// position by up to +64px (deepest water) or -52px (highest land) against a
+// 75px row pitch, so one row of slack on each side is not enough.
+const RELIEF_PROBE_ROWS = 2;
+
+const CELL_CACHE_DROP_KEYS = new Set([
+  "m", "mine", "blendedHeight",
+  // Per-session render memo. Uploading it would leak which cells are hidden
+  // and which tribe they are pretending to be.
+  "hiddenDisguise",
+]);
 // Avatars are only kept on main yards; outposts repeating the same URL are
 // pure cache bloat (the profile photo lookup walks all of a player's cells
 // and finds the main's copy anyway).
@@ -127,6 +197,23 @@ export class MapRenderer {
     this.cellCache = new Map();
     this.loadedZones = new Map();
     this.pendingZones = new Set();
+    // Bumped whenever the cell cache is written to. Anything derived from the
+    // whole cache (currently the range-highlight set) memoises against it
+    // rather than recomputing per frame.
+    this.cacheVersion = 0;
+    this.worldBitmap = null;
+    this.worldBitmapVersion = -1;
+    // Cells written since the bitmap was last built. A zone merge touches a
+    // few hundred; repainting those pixels is far cheaper than the ~120ms
+    // full rebuild, which is reserved for a cold start or a bulk change.
+    this.worldBitmapDirty = [];
+    this.baseCellIndex = [];
+    this.baseCellVersion = -1;
+    this.rangeHighlightVersion = -1;
+    this.rangeHighlightKeys = new Set();
+    // key -> in-flight reloadZoneNow promise, so base opens in the same zone
+    // share one fetch instead of racing identical ones.
+    this.zoneReloadsInFlight = new Map();
     this.zoneQueue = [];
     this.queuedZoneKeys = new Set();
     this.zoneWorkersActive = 0;
@@ -138,7 +225,7 @@ export class MapRenderer {
     this.zoneWaitStats = { successes: 0, failures: 0, firstError: null };
     this.jumpMarker = null;
     this.highlightNames = { allies: new Set(), enemies: new Set() };
-    this.hiddenTileStyle = "blend";
+    this.hiddenTileStyle = "tribe";
     // Zones holding the player's own bases / allied bases, for the tiered
     // freshness rules. Rebuilt on bootstrap and highlight changes, extended
     // incrementally during merges.
@@ -149,6 +236,8 @@ export class MapRenderer {
     this.ownMainZones = new Set();
     this.ownOutpostZones = new Set();
     this.showLoot = false;
+    this.showOutpostTypes = false;
+    this.showIdleWorkers = true;
     this.lootResource = "total";
     // Players hidden from the map for normal users (moderation). Empty for
     // administrators, who see everything.
@@ -156,13 +245,20 @@ export class MapRenderer {
     // Main-yard name labels are collected during the cell pass and drawn
     // last, so they sit on top of every cell, overlay, and highlight.
     this.pendingMainLabels = [];
-    this.onViewStateChanged = null;
-    this.viewStateSaveTimer = null;
     this.onCellOwnershipChanges = null;
     this.scanState = null;
     this.measureMode = false;
-    this.measurePoints = [];
+    // Completed measurements: [{ a: {x,y}, b: {x,y} }], any number of them.
+    this.measurements = [];
+    // First point of an in-progress measurement (rubber-bands to the mouse).
+    this.measureDraft = null;
+    // A picked-up endpoint being repositioned: { index, end: "a"|"b" }.
+    this.measureCarry = null;
+    this.measurePointerInside = false;
     this.onMeasureUpdated = null;
+    // Settles when the current world's full explored cache is hydrated;
+    // the bootstraps hold the loading overlay on it.
+    this.cacheHydrationDone = null;
     this.homeCellKey = null;
     this.hoveredCellKey = null;
     this.selectedCellKey = null;
@@ -225,8 +321,12 @@ export class MapRenderer {
     this.guestMode = true;
     this.serverName = String(serverName || "").trim() || null;
     this.cellCache.clear();
+    this.cacheVersion += 1;
+    this.worldBitmap = null;
+    this.worldBitmapDirty = [];
     this.loadedZones.clear();
     this.pendingZones.clear();
+    this.zoneReloadsInFlight.clear();
     this.zoneQueue = [];
     this.queuedZoneKeys = new Set();
     this.dirtyZoneKeys.clear();
@@ -235,13 +335,24 @@ export class MapRenderer {
     this.selectedCellKey = null;
     this.jumpMarker = null;
     this.zoom = DEFAULT_MAP_ZOOM;
+    this.zoneFetchGeneration += 1;
+    const bootGeneration = this.zoneFetchGeneration;
     this.setOverlay("Loading cached map...");
 
-    this.centerOnCell(Math.floor(this.getMapWidth() / 2), Math.floor(this.getMapHeight() / 2));
+    // Guests land on 0,0 rather than the middle of the world: it is a fixed,
+    // nameable place, so a shared link and a cold open agree on where "the
+    // start" is.
+    this.centerOnCell(0, 0);
     let restored = false;
     if (this.serverName) {
       restored = await this.restoreExploredCache();
       this.rebuildFreshnessZones();
+      // Same rule as the signed-in bootstrap: the overlay only drops once
+      // the whole cached world is on the map.
+      await (this.cacheHydrationDone || Promise.resolve());
+      if (this.zoneFetchGeneration !== bootGeneration) {
+        return this.loadedZones.size;
+      }
     }
     this.setOverlay("");
     this.render();
@@ -254,6 +365,9 @@ export class MapRenderer {
     if (this.guestMode) {
       this.guestMode = false;
       this.cellCache.clear();
+    this.cacheVersion += 1;
+    this.worldBitmap = null;
+    this.worldBitmapDirty = [];
       this.loadedZones.clear();
     }
     this.cancelAnimations();
@@ -263,8 +377,12 @@ export class MapRenderer {
     this.mapMeta = session.map;
     this.settleZoneWait();
     this.cellCache.clear();
+    this.cacheVersion += 1;
+    this.worldBitmap = null;
+    this.worldBitmapDirty = [];
     this.loadedZones.clear();
     this.pendingZones.clear();
+    this.zoneReloadsInFlight.clear();
     this.zoneQueue = [];
     this.queuedZoneKeys = new Set();
     this.zoneFetchGeneration += 1;
@@ -293,19 +411,32 @@ export class MapRenderer {
       this.homeCellKey = cellKey(homebase[0], homebase[1]);
     }
 
-    const restoredView = this.restoreViewState(session.viewState);
-    if (!restoredView) {
-      if (this.homeCellKey) {
-        const home = this.getHomeCoordinates();
-        this.centerOnCell(home.x, home.y);
-      } else {
-        this.centerOnCell(Math.floor(this.getMapWidth() / 2), Math.floor(this.getMapHeight() / 2));
-      }
+    // Signing in always lands on your own main yard at 1:1, ahead of any
+    // saved view state - the point of signing in is to see your own empire,
+    // and a restored viewport from a previous session is rarely where you
+    // wanted to start. Zoom is set before centring so centerOnCell measures
+    // the viewport at the zoom it will actually be drawn at.
+    this.zoom = 1;
+    if (this.homeCellKey) {
+      const home = this.getHomeCoordinates();
+      this.centerOnCell(home.x, home.y);
+    } else {
+      this.centerOnCell(Math.floor(this.getMapWidth() / 2), Math.floor(this.getMapHeight() / 2));
     }
 
+    const bootGeneration = this.zoneFetchGeneration;
     await this.restoreExploredCache();
     this.rebuildFreshnessZones();
     this.render();
+
+    // The initial load holds the overlay until EVERY cached cell is on the
+    // map, not just the viewport slice - cells popping in after the screen
+    // "unlocked" read as the map being broken.
+    this.setOverlay("Loading cached map cells...");
+    await (this.cacheHydrationDone || Promise.resolve());
+    if (this.zoneFetchGeneration !== bootGeneration) {
+      return; // superseded by another bootstrap; it owns the overlay now
+    }
 
     // Cached cells display immediately, but a fresh login always re-fetches
     // the zones in view so the player starts with current data.
@@ -314,11 +445,15 @@ export class MapRenderer {
     // rest of the viewport paints from cache and refreshes in the
     // background: allies first, then by proximity (stage 2/3 fall out of
     // the priority ordering).
+    this.setOverlay("Loading live MR2 data...");
     await this.ensureCellsForViewport(true, { waitForCompletion: true, onlyOwn: true });
     this.ensureCellsForViewport(true).catch((error) => {
       console.warn("Background zone refresh failed.", error);
     });
 
+    if (this.zoneFetchGeneration !== bootGeneration) {
+      return;
+    }
     this.setOverlay("");
     this.render();
   }
@@ -363,14 +498,24 @@ export class MapRenderer {
     this.settleZoneWait();
     this.jumpMarker = null;
     this.measureMode = false;
-    this.measurePoints = [];
+    this.measurements = [];
+    this.measureDraft = null;
+    this.measureCarry = null;
+    this.measurePointerInside = false;
+    // setMeasureMode owns the cursor; a teardown mid-measure must not leave
+    // the crosshair behind.
+    this.canvas.style.cursor = "";
     this.token = null;
     this.currentUserId = null;
     this.mapMeta = null;
     this.guestMode = false;
     this.cellCache.clear();
+    this.cacheVersion += 1;
+    this.worldBitmap = null;
+    this.worldBitmapDirty = [];
     this.loadedZones.clear();
     this.pendingZones.clear();
+    this.zoneReloadsInFlight.clear();
     this.zoneQueue = [];
     this.queuedZoneKeys = new Set();
     this.zoneFetchGeneration += 1;
@@ -387,10 +532,6 @@ export class MapRenderer {
     if (this.persistTimer) {
       window.clearTimeout(this.persistTimer);
       this.persistTimer = null;
-    }
-    if (this.viewStateSaveTimer) {
-      window.clearTimeout(this.viewStateSaveTimer);
-      this.viewStateSaveTimer = null;
     }
     this.serverName = null;
     this.dirtyZoneKeys.clear();
@@ -450,12 +591,19 @@ export class MapRenderer {
   hasActiveBaseFilter() {
     return (
       this.baseFilter.types.size > 0 ||
-      this.baseFilter.tribes.size > 0 ||
+      this.baseFilter.kits.size > 0 ||
       Number(this.baseFilter.levelMin || 0) > 0 ||
       Number(this.baseFilter.levelMax || 0) > 0 ||
       Boolean(this.baseFilter.bigOwners) ||
-      Number(this.baseFilter.playerOwnerId || 0) > 0 ||
-      Boolean(this.baseFilter.inactiveNames)
+      Boolean(this.baseFilter.playerOwnerIds) ||
+      Boolean(this.baseFilter.inactiveNames) ||
+      this.baseFilter.heights.size > 0 ||
+      this.baseFilter.owners.size > 0 ||
+      this.baseFilter.tribes.size > 0 ||
+      this.baseFilter.protection.size > 0 ||
+      this.baseFilter.damageMin !== null ||
+      this.baseFilter.damageMax !== null ||
+      Boolean(this.baseFilter.flingerCells)
     );
   }
 
@@ -472,7 +620,12 @@ export class MapRenderer {
     }
 
     if (this.isCellHidden(cell)) {
-      return false;
+      // A hidden base still draws - as the wild monster cell it is
+      // masquerading as, via displayCell(). Search, filters, profiles and the
+      // shared cache all continue to exclude it; this is a drawing decision
+      // only. "water" is the one style that suppresses the marker, sinking
+      // the tile to the waterline instead.
+      return this.hiddenTileStyle !== "water";
     }
 
     if (!this.hasActiveBaseFilter()) {
@@ -486,13 +639,34 @@ export class MapRenderer {
     return this.matchesBaseFilter(cell);
   }
 
+  // me / allies / enemies / other for a player-owned cell, from the relation
+  // sets the app supplies with the filter. Without them everything reads as
+  // "other" (a filter that needs them always ships them).
+  resolveOwnerRelation(cell) {
+    if (Number(cell.mine || 0) === 1) {
+      return "me";
+    }
+    const rel = this.baseFilter.relSets;
+    if (!rel) {
+      return "other";
+    }
+    const owner = String(cell.n || "").trim().toLocaleLowerCase();
+    if (!owner) {
+      return "other";
+    }
+    if (rel.own?.has(owner)) return "me";
+    if (rel.enemies?.has(owner)) return "enemies";
+    if (rel.allies?.has(owner)) return "allies";
+    return "other";
+  }
+
   matchesPlayerOwnerFilter(cell) {
-    const ownerId = Number(this.baseFilter.playerOwnerId || 0);
-    if (ownerId <= 0) {
+    const ownerIds = this.baseFilter.playerOwnerIds;
+    if (!ownerIds || !ownerIds.size) {
       return false;
     }
 
-    if (Number(cell.uid || 0) !== ownerId) {
+    if (!ownerIds.has(Number(cell.uid || 0))) {
       return false;
     }
 
@@ -500,7 +674,7 @@ export class MapRenderer {
   }
 
   matchesBaseFilter(cell) {
-    if (Number(this.baseFilter.playerOwnerId || 0) > 0 && !this.matchesPlayerOwnerFilter(cell)) {
+    if (this.baseFilter.playerOwnerIds && !this.matchesPlayerOwnerFilter(cell)) {
       return false;
     }
 
@@ -521,9 +695,66 @@ export class MapRenderer {
       }
     }
 
+    // Cell height: the terrain frame under the base, via the same accessor
+    // the terrain painters use. Chips exist only for frames bases can stand
+    // on, so a water anomaly passes through.
+    if (this.baseFilter.heights.size > 0) {
+      const frame = terrainFrameFor(this.terrainHeightFor(cell));
+      if (this.baseFilter.heights.has("__none__") ||
+          (frame.startsWith("water") ? false : !this.baseFilter.heights.has(frame))) {
+        return false;
+      }
+    }
+
+    // Owner relation constrains player bases only; wild cells pass through,
+    // like the kit checklist does for mains.
+    const isPlayerBase = Number(cell.b) === MR2.yardTypes.main
+      || Number(cell.b) === MR2.yardTypes.outpost;
+    if (this.baseFilter.owners.size > 0 && isPlayerBase) {
+      if (!this.baseFilter.owners.has(this.resolveOwnerRelation(cell))) {
+        return false;
+      }
+    }
+
+    // Tribe constrains wild cells only; an unrecognized tribe passes.
+    if (this.baseFilter.tribes.size > 0
+        && Number(cell.b) === MR2.yardTypes.wildMonster) {
+      const tribe = getTribeKey(cell);
+      if (tribe && !this.baseFilter.tribes.has(tribe)) {
+        return false;
+      }
+      if (this.baseFilter.tribes.has("__none__")) {
+        return false;
+      }
+    }
+
+    // Damage band: applies to every base cell (wilds carry damage too).
+    const damageMin = this.baseFilter.damageMin;
+    const damageMax = this.baseFilter.damageMax;
+    if (damageMin !== null || damageMax !== null) {
+      const damage = Number(cell.dm || 0);
+      if (damageMin !== null && damage < damageMin) return false;
+      if (damageMax !== null && damage > damageMax) return false;
+    }
+
+    // Damage protection: player bases only (wilds cannot bubble). cell.p is
+    // the shield flag the popup's "Protection" row reads.
+    if (this.baseFilter.protection.size > 0 && isPlayerBase) {
+      const state = Number(cell.p || 0) === 1 ? "protected" : "unprotected";
+      if (!this.baseFilter.protection.has(state)) return false;
+    }
+
+    // Flinger range: hex-disk reach of the chosen anchors, precomputed with
+    // the same GetCellsInRange port that draws the range rings.
+    if (this.baseFilter.flingerCells) {
+      if (!this.baseFilter.flingerCells.has(cellKey(Number(cell.x || 0), Number(cell.y || 0)))) {
+        return false;
+      }
+    }
+
     const needsMetadata = (
       this.baseFilter.types.size > 0 ||
-      this.baseFilter.tribes.size > 0 ||
+      this.baseFilter.kits.size > 0 ||
       Number(this.baseFilter.levelMin || 0) > 0 ||
       Number(this.baseFilter.levelMax || 0) > 0
     );
@@ -540,21 +771,27 @@ export class MapRenderer {
       return false;
     }
 
+    // The kit checklist constrains outposts only: mains and wild bases pass
+    // through so unchecking "Ultra" hides ultra outposts without touching
+    // the rest of the map.
     if (
-      this.baseFilter.tribes.size > 0 &&
-      (!metadata.tribe || !this.baseFilter.tribes.has(metadata.tribe))
+      this.baseFilter.kits.size > 0 &&
+      metadata.type === "outpost" &&
+      !this.baseFilter.kits.has(metadata.kit)
     ) {
       return false;
     }
 
+    // The level slider is "Wild monster level": player bases pass through.
     const levelMin = Number(this.baseFilter.levelMin || 0);
     const levelMax = Number(this.baseFilter.levelMax || 0);
-    if (levelMin > 0 && (metadata.level <= 0 || metadata.level < levelMin)) {
-      return false;
-    }
-
-    if (levelMax > 0 && (metadata.level <= 0 || metadata.level > levelMax)) {
-      return false;
+    if (metadata.type === "wild") {
+      if (levelMin > 0 && (metadata.level <= 0 || metadata.level < levelMin)) {
+        return false;
+      }
+      if (levelMax > 0 && (metadata.level <= 0 || metadata.level > levelMax)) {
+        return false;
+      }
     }
 
     return true;
@@ -618,12 +855,68 @@ export class MapRenderer {
     }
 
     const tribe = type === "wild" ? getTribeKey(cell) : null;
+    // getarea reports v per cell from that cell's own save, so this is the
+    // outpost's own empire value - the same signal the cell popup's Kit
+    // line uses.
+    const kit = type === "outpost" ? getOutpostKitKey(cell.v) : null;
     const level = Number(cell.l || 0);
-    return { type, tribe, level };
+    return { type, tribe, kit, level };
   }
 
   // Outpost count per player across the explored map - the data behind the
   // "big fish" outpost filter (lowercased name -> count).
+  // Ownership-change records across the explored map, newest first, built
+  // from the tt/po/pn/pb stamps the merge path leaves on cells. Shared-cache
+  // hydration brings in records other viewers observed, so this covers the
+  // whole world's known history, not just this session's.
+  getRecentChangeRecords(limit = 200) {
+    const records = [];
+    for (const cell of this.cellCache.values()) {
+      const at = Number(cell.tt || 0);
+      if (!(at > 0)) {
+        continue;
+      }
+      records.push({
+        x: Number(cell.x),
+        y: Number(cell.y),
+        at,
+        prevUid: Number(cell.po || 0),
+        prevName: String(cell.pn || "").trim(),
+        prevType: Number(cell.pb || 0),
+        newUid: Number(cell.uid || 0),
+        newName: String(cell.n || "").trim(),
+        newType: Number(cell.b || 0),
+      });
+    }
+    records.sort((left, right) => right.at - left.at);
+    return records.slice(0, Math.max(1, limit));
+  }
+
+  // Per-owner outpost kit tallies (lowercased name -> {none, regular, mega,
+  // ultra, total}) across the explored map. Same coverage caveat as
+  // getOwnerOutpostCounts: it can only count outposts in zones this viewer
+  // has actually cached.
+  getOwnerKitCounts() {
+    const counts = new Map();
+    for (const cell of this.cellCache.values()) {
+      if (Number(cell.b) !== MR2.yardTypes.outpost || Number(cell.uid || 0) <= 0) {
+        continue;
+      }
+      const owner = String(cell.n || "").trim().toLocaleLowerCase();
+      if (!owner) {
+        continue;
+      }
+      let entry = counts.get(owner);
+      if (!entry) {
+        entry = { none: 0, regular: 0, mega: 0, ultra: 0, total: 0 };
+        counts.set(owner, entry);
+      }
+      entry[getOutpostKitKey(cell.v)] += 1;
+      entry.total += 1;
+    }
+    return counts;
+  }
+
   getOwnerOutpostCounts() {
     const counts = new Map();
     for (const cell of this.cellCache.values()) {
@@ -646,6 +939,10 @@ export class MapRenderer {
     return counts;
   }
 
+  getZoomRange() {
+    return { min: MIN_ZOOM, max: MAX_ZOOM };
+  }
+
   zoomBy(multiplier, animate = false) {
     const rect = this.canvas.getBoundingClientRect();
     const focusX = rect.width * 0.5;
@@ -660,10 +957,18 @@ export class MapRenderer {
     this.setZoom(this.zoom * multiplier, focusX, focusY);
   }
 
-  setOverlay(message) {
+  setOverlay(message, options = {}) {
     this.buildOverlayContent();
     this.overlayMessageEl.textContent = message || "";
     this.overlayEl.hidden = !message;
+    // A dismissible overlay (the session-expired notice) shows an x in the
+    // card's top-right corner: closing it uncovers the cached map so the
+    // person can keep browsing - and keep receiving alliance messages and
+    // everything else that rides the site session - without signing back
+    // in to the game. Zone loading stays halted either way.
+    if (this.overlayCloseEl) {
+      this.overlayCloseEl.hidden = !(message && options.dismissible);
+    }
     // Each new overlay message starts without a progress bar; zone loading
     // reveals it via setOverlayProgress once totals are known.
     this.setOverlayProgress(null);
@@ -686,6 +991,21 @@ export class MapRenderer {
         '<div class="map-overlay-progress" hidden><div class="map-overlay-progress-fill"></div></div>';
       this.overlayEl.appendChild(card);
     }
+    // The x lives on the card, hidden by default; only dismissible
+    // messages reveal it.
+    let close = card.querySelector(".map-overlay-close");
+    if (!close) {
+      close = document.createElement("button");
+      close.type = "button";
+      close.className = "popup-close map-overlay-close";
+      close.setAttribute("aria-label", "Dismiss and browse the cached map");
+      close.title = "Dismiss and browse the cached map";
+      close.innerHTML = "&times;";
+      close.hidden = true;
+      close.addEventListener("click", () => this.setOverlay(""));
+      card.appendChild(close);
+    }
+    this.overlayCloseEl = close;
     this.overlayMessageEl = card.querySelector(".map-overlay-message");
     this.overlayProgressEl = card.querySelector(".map-overlay-progress");
     this.overlayProgressFillEl = card.querySelector(".map-overlay-progress-fill");
@@ -739,7 +1059,11 @@ export class MapRenderer {
 
     this.zoom = clampedZoom;
     this.offsetX = before.x - localFocusX / this.zoom;
-    this.offsetY = before.y - localFocusY / this.zoom;
+    // Must be the exact inverse of screenToWorld, which divides out the mcBG
+    // vertical stretch. Without the same division here the focus point drifts
+    // by the aspect ratio on every step, so repeated zooming walked the camera
+    // steadily upward.
+    this.offsetY = before.y - this.viewWorldHeight(localFocusY);
     this.clampOffset();
     this.render();
     this.scheduleFetch();
@@ -871,7 +1195,7 @@ export class MapRenderer {
 
       this.zoom = interpolatedZoom;
       this.offsetX = centerWorldX - width / (2 * this.zoom);
-      this.offsetY = centerWorldY - height / (2 * this.zoom);
+      this.offsetY = centerWorldY - this.viewWorldHeight(height) / 2;
       this.renderNow();
 
       if (progress < 1) {
@@ -905,7 +1229,7 @@ export class MapRenderer {
     const height = this.canvas.clientHeight || 1;
     const world = this.cellToWorld(cellX, cellY);
     const offsetX = world.x - width / (2 * zoom) + MR2.cellWidth * 0.5;
-    const offsetY = world.y - height / (2 * zoom) + MR2.cellHeight * 0.5;
+    const offsetY = world.y - ((height / MCBG_ASPECT) / zoom) / 2 + MR2.cellHeight * 0.5;
     return this.getClampedOffset(offsetX, offsetY);
   }
 
@@ -917,6 +1241,53 @@ export class MapRenderer {
 
   // Converts a /worldmapv2/getarea response ({ x: { y: cell } }) into
   // normalized cells keyed by coordinates.
+  // Stamps ownership-change history onto a freshly merged cell:
+  //   tt - takeover time, UTC ms (always set when a change is known; the
+  //        cache minifiers drop zero values, so tt > 0 is the presence flag)
+  //   po - previous owner uid (omitted when the previous owner was wild)
+  //   pn - previous owner/tribe name
+  //   pb - previous cell type (wild/main/outpost)
+  // When no new change is seen, history carries forward from the prior
+  // cached cell; history arriving from the shared cache (another viewer
+  // observed the change first) is kept as-is. A record with no timestamp
+  // (older cache format) defaults to the current UTC time.
+  applyChangeTracking(previous, current) {
+    const changed = Boolean(previous) &&
+      Number(previous.uid || 0) !== Number(current.uid || 0);
+
+    if (changed && !(Number(current.tt) > 0)) {
+      const prevUid = Number(previous.uid || 0);
+      if (prevUid > 0) {
+        current.po = prevUid;
+      } else {
+        delete current.po;
+      }
+      const prevName = String(previous.n || "").trim();
+      if (prevName) {
+        current.pn = prevName;
+      } else {
+        delete current.pn;
+      }
+      const prevType = Number(previous.b || 0);
+      if (prevType) {
+        current.pb = prevType;
+      }
+      current.tt = Date.now();
+    } else if (!changed && previous && !(Number(current.tt) > 0) && Number(previous.tt) > 0) {
+      current.tt = Number(previous.tt);
+      if (previous.po !== undefined) current.po = previous.po;
+      if (previous.pn !== undefined) current.pn = previous.pn;
+      if (previous.pb !== undefined) current.pb = previous.pb;
+    }
+
+    // "Default to the current UTC time if nonexistent": a record that has
+    // owner history but no usable timestamp gets one now.
+    if ((current.po !== undefined || current.pn !== undefined) && !(Number(current.tt) > 0)) {
+      current.tt = Date.now();
+    }
+    return changed;
+  }
+
   mergeZoneResponse(response) {
     const data = response?.data;
     if (!data || typeof data !== "object") {
@@ -924,6 +1295,7 @@ export class MapRenderer {
     }
 
     const ownershipChanges = [];
+    const ingestedCells = [];
 
     for (const [rawX, column] of Object.entries(data)) {
       if (!column || typeof column !== "object") {
@@ -941,12 +1313,17 @@ export class MapRenderer {
         const previous = this.cellCache.get(key) || null;
         const current = this.normalizeCell(x, y, rawCell);
         this.cellCache.set(key, current);
+        this.cacheVersion += 1;
+        this.worldBitmapDirty.push(current);
         this.noteFreshnessCell(current);
+        ingestedCells.push(current);
 
         // Report ownership transitions (captures / losses) for cells we had
         // prior data on. A change means the owner uid differs, which covers
         // wild -> player, player -> wild, and player -> player takeovers.
-        if (previous && Number(previous.uid || 0) !== Number(current.uid || 0)) {
+        // applyChangeTracking also stamps the record onto the cell so the
+        // shared cache carries it to every other viewer.
+        if (this.applyChangeTracking(previous, current)) {
           ownershipChanges.push({ x, y, previous, current });
         }
       }
@@ -957,6 +1334,16 @@ export class MapRenderer {
         this.onCellOwnershipChanges(ownershipChanges);
       } catch (error) {
         console.warn("Ownership-change handler failed.", error);
+      }
+    }
+    // Live-zone hook: the app archives baseloads for main yards it has
+    // not captured recently. Fired only for live getarea ingests (this
+    // method), never for shared-cache hydration.
+    if (ingestedCells.length && typeof this.onZoneLoaded === "function") {
+      try {
+        this.onZoneLoaded(ingestedCells);
+      } catch (error) {
+        console.warn("Zone-loaded handler failed.", error);
       }
     }
   }
@@ -974,6 +1361,10 @@ export class MapRenderer {
       f: Number(rawCell.f || 0),
       c: Number(rawCell.c || 0),
       dm: Number(rawCell.dm || 0),
+      // The monster-housing blob is dropped below, but the worker-idle
+      // icon needs to know whether a job is running: keep just its
+      // finishtime (seconds since epoch; 0 = no job = worker idle).
+      mft: Number(rawCell?.m?.finishtime || rawCell?.mft || 0),
       d: Number(rawCell.d || 0),
       lo: Number(rawCell.lo || 0),
       p: Number(rawCell.p || 0),
@@ -1009,10 +1400,14 @@ export class MapRenderer {
       return false; // already hydrated (e.g. by the viewport-first phase)
     }
     this.loadedZones.set(key, fetchedAt);
+    this.ownRangeDirty = true;
     if (Array.isArray(zone.cells)) {
       for (const cell of zone.cells) {
         if (cell && Number.isFinite(Number(cell.x)) && Number.isFinite(Number(cell.y))) {
-          this.cellCache.set(cellKey(cell.x, cell.y), this.normalizeCell(Number(cell.x), Number(cell.y), cell));
+          const normalized = this.normalizeCell(Number(cell.x), Number(cell.y), cell);
+          this.cellCache.set(cellKey(cell.x, cell.y), normalized);
+          this.cacheVersion += 1;
+          this.worldBitmapDirty.push(normalized);
         }
       }
     }
@@ -1061,7 +1456,7 @@ export class MapRenderer {
       const width = this.canvas.clientWidth || 1;
       const height = this.canvas.clientHeight || 1;
       const centerX = this.offsetX + width / (2 * this.zoom);
-      const centerY = this.offsetY + height / (2 * this.zoom);
+      const centerY = this.offsetY + this.viewWorldHeight(height) / 2;
       const centerZoneX = zoneOriginForCell(Math.floor(centerX / MR2.columnStep));
       const centerZoneY = zoneOriginForCell(Math.floor(centerY / MR2.cellHeight));
       const mapWidth = this.getMapWidth();
@@ -1090,10 +1485,17 @@ export class MapRenderer {
       }
     }
 
-    this.hydrateRemainderInBackground();
+    // The bootstraps await this before dropping the loading overlay, so the
+    // map never "unlocks" while cached cells are still streaming in.
+    this.cacheHydrationDone = this.hydrateRemainderInBackground();
     return restoredAny;
   }
 
+  // Streams the rest of the explored cache onto the map in idle-time slices.
+  // Returns a promise that settles once every cached zone has been hydrated
+  // (or the world was switched away mid-hydration). While the loading
+  // overlay is up it doubles as the progress source; the overlay's own
+  // hidden check makes the reporting a no-op after the overlay drops.
   hydrateRemainderInBackground() {
     const serverName = this.serverName;
     const generation = this.zoneFetchGeneration;
@@ -1101,12 +1503,13 @@ export class MapRenderer {
       ? window.requestIdleCallback(fn, { timeout: 500 })
       : window.setTimeout(fn, 16));
 
-    storageGetServerMap(serverName).then((payload) => {
+    return storageGetServerMap(serverName).then((payload) => new Promise((resolve) => {
       const zones = Array.isArray(payload?.zones) ? payload.zones : [];
       let index = 0;
       const slice = () => {
         if (this.zoneFetchGeneration !== generation || this.serverName !== serverName) {
-          return; // world switched away mid-hydration
+          resolve(); // world switched away mid-hydration
+          return;
         }
         const end = Math.min(index + 60, zones.length);
         let touched = false;
@@ -1117,6 +1520,7 @@ export class MapRenderer {
           if (touched) {
             this.render();
           }
+          this.setOverlayProgress({ completed: index, total: zones.length });
           idle(slice);
         } else {
           // Own bases outside the initial viewport are only known now.
@@ -1128,10 +1532,11 @@ export class MapRenderer {
           if (typeof this.onCacheHydrated === "function") {
             this.onCacheHydrated();
           }
+          resolve();
         }
       };
       idle(slice);
-    }).catch((error) => {
+    })).catch((error) => {
       console.warn("[BYM-MR2] Background cache hydration failed.", error);
     });
   }
@@ -1237,52 +1642,10 @@ export class MapRenderer {
       });
     }, FETCH_DEBOUNCE_MS);
 
-    this.scheduleViewStateSave();
+
   }
 
-  // Debounced notification so the app can persist the camera position.
-  scheduleViewStateSave() {
-    if (typeof this.onViewStateChanged !== "function") {
-      return;
-    }
 
-    if (this.viewStateSaveTimer) {
-      window.clearTimeout(this.viewStateSaveTimer);
-    }
-
-    this.viewStateSaveTimer = window.setTimeout(() => {
-      this.viewStateSaveTimer = null;
-      if (!this.token) {
-        return;
-      }
-
-      const center = this.getCenterCell();
-      this.onViewStateChanged({ x: center.x, y: center.y, zoom: this.zoom });
-    }, 700);
-  }
-
-  restoreViewState(viewState) {
-    if (!viewState) {
-      return false;
-    }
-
-    const x = Number(viewState.x);
-    const y = Number(viewState.y);
-    const zoom = Number(viewState.zoom);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      return false;
-    }
-
-    if (Number.isFinite(zoom) && zoom > 0) {
-      this.zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
-    }
-
-    this.centerOnCell(
-      clamp(Math.round(x), 0, this.getMapWidth() - 1),
-      clamp(Math.round(y), 0, this.getMapHeight() - 1),
-    );
-    return true;
-  }
 
   // Queues /worldmapv2/getarea requests for every zone that intersects the
   // current viewport. Zones are 10x10 chunks aligned to multiples of 10,
@@ -1410,7 +1773,7 @@ export class MapRenderer {
     const minWorldX = this.offsetX;
     const maxWorldX = this.offsetX + width / this.zoom;
     const minWorldY = this.offsetY;
-    const maxWorldY = this.offsetY + height / this.zoom;
+    const maxWorldY = this.offsetY + this.viewWorldHeight(height);
 
     // Unclamped: indices past the map edges refer to wrap copies of cells on
     // the far side (consumers wrap them with positiveModulo). Cap the span at
@@ -1620,7 +1983,7 @@ export class MapRenderer {
     const width = this.canvas.clientWidth || 1;
     const height = this.canvas.clientHeight || 1;
     const worldX = this.offsetX + width / (2 * this.zoom);
-    const worldY = this.offsetY + height / (2 * this.zoom);
+    const worldY = this.offsetY + this.viewWorldHeight(height) / 2;
     return this.findGridCellAtWorldPoint(worldX, worldY);
   }
 
@@ -1633,6 +1996,7 @@ export class MapRenderer {
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
     this.lastPointer = { x: localX, y: localY };
+    this.measurePointerInside = true;
     this.setCoordinatesDisplay(this.findGridCellAtPoint(localX, localY));
 
     if (event.cancelable) {
@@ -1672,6 +2036,7 @@ export class MapRenderer {
     }
 
     this.lastPointer = { x: localX, y: localY };
+    this.measurePointerInside = true;
     this.setCoordinatesDisplay(this.findGridCellAtPoint(localX, localY));
 
     if (this.pinchState && this.activePointers.size >= 2) {
@@ -1708,10 +2073,20 @@ export class MapRenderer {
       this.hoveredCellKey = hoveredKey;
       this.onHoverCell(hovered);
       this.render();
+    } else if (this.measureMode) {
+      // The rubber band and cursor ruler track the pointer continuously, not
+      // just on cell boundaries. Same per-move repaint cost as drag-panning.
+      this.render();
     }
   }
 
   handlePointerUp(event) {
+    // Touch has no hover: once the finger lifts there is no pointer on the
+    // canvas, so the measure ruler and rubber band must stop drawing at the
+    // lift position instead of freezing there.
+    if (event.pointerType === "touch") {
+      this.measurePointerInside = false;
+    }
     const wasPinching = Boolean(this.pinchState);
     const wasDraggingPointer = this.dragging && event.pointerId === this.dragPointerId;
 
@@ -1762,6 +2137,11 @@ export class MapRenderer {
   }
 
   handlePointerCancel(event) {
+    if (event?.pointerType === "touch") {
+      // Same as handlePointerUp: a cancelled touch leaves no pointer on the
+      // canvas, so measure-mode pointer visuals must stop drawing.
+      this.measurePointerInside = false;
+    }
     if (event?.pointerId != null) {
       this.releasePointerCapture(event.pointerId);
       this.activePointers.delete(event.pointerId);
@@ -1787,6 +2167,9 @@ export class MapRenderer {
 
   handlePointerLeave() {
     this.setCoordinatesDisplay(null);
+    // The cursor ruler and any rubber band stop drawing once the pointer is
+    // off the canvas.
+    this.measurePointerInside = false;
     if (this.dragging) {
       return;
     }
@@ -1851,7 +2234,8 @@ export class MapRenderer {
     );
     this.zoom = nextZoom;
     this.offsetX = this.pinchState.world.x - center.x / this.zoom;
-    this.offsetY = this.pinchState.world.y - center.y / this.zoom;
+    // Inverse of screenToWorld - see setZoom. Pinch drifts the same way.
+    this.offsetY = this.pinchState.world.y - this.viewWorldHeight(center.y);
     this.lastPointer = center;
     this.setCoordinatesDisplay(this.findGridCellAtPoint(center.x, center.y));
     this.clampOffset();
@@ -1954,6 +2338,11 @@ export class MapRenderer {
         zones.push({ key: zoneKey(zoneX, zoneY), x: zoneX, y: zoneY });
       }
     }
+    // Oldest data first: never-fetched zones lead, then ascending fetch
+    // time, so a scan cancelled partway has always bought the maximum
+    // possible freshness instead of whatever coordinate order reached.
+    zones.sort((a, b) =>
+      (this.loadedZones.get(a.key) ?? -Infinity) - (this.loadedZones.get(b.key) ?? -Infinity));
 
     const state = {
       active: true,
@@ -2006,9 +2395,12 @@ export class MapRenderer {
         }
 
         try {
-          // Priority 50: a maintenance scan must never crowd out anybody's
-          // live map traffic on the shared budget.
-          const response = await this.api.getArea(this.token, zone.x, zone.y, this.zoneScope(), 50);
+          // Priority 10 by operator choice: Scan World is admin-initiated
+          // maintenance and runs at the top of the budget (and past the
+          // client zone pacer). Historical note: this once sent 50 under a
+          // "never crowd out live traffic" comment, which the server
+          // clamped to 10 anyway - now the value says what it does.
+          const response = await this.api.getArea(this.token, zone.x, zone.y, this.zoneScope(), 10);
           if (state.generation !== this.zoneFetchGeneration) {
             return;
           }
@@ -2056,6 +2448,22 @@ export class MapRenderer {
     };
   }
 
+  /**
+   * Stops all outstanding zone loading, keeping the cells already drawn.
+   *
+   * Used when the session dies: the queued zones can only produce 401s, and
+   * each one would otherwise drive another token-recovery attempt. The map
+   * stays visible and pannable from cache; only fetching stops.
+   */
+  haltZoneLoading() {
+    this.zoneQueue = [];
+    this.queuedZoneKeys = new Set();
+    this.cancelWorldScan();
+    // Releases anyone blocked in awaitZoneKey rather than leaving them hanging.
+    this.settleZoneWait();
+    this.updateOverlayProgress();
+  }
+
   cancelWorldScan() {
     if (this.scanState) {
       this.scanState.cancelRequested = true;
@@ -2082,19 +2490,49 @@ export class MapRenderer {
       return false;
     }
     const key = zoneKey(zone.x, zone.y);
-    const response = await this.api.getArea(
-      this.token, zone.x, zone.y, this.zoneScope(), priority,
-    );
-    // A world switch / sign-out mid-flight invalidates this response.
-    if (!this.token) {
+
+    // Coalesce: two opens of bases in the same zone (the picker does exactly
+    // this) must share one fetch, not race two identical ones. A real capture
+    // showed three calls for one zone inside 46ms.
+    const existing = this.zoneReloadsInFlight.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    // Throttle: this call deliberately bypasses the queue and the freshness
+    // tiers so the base viewer gets a fresh `bid`, but "not queued" does not
+    // have to mean "unthrottled". Without a floor, every base opened - or
+    // reopened - refetched the whole zone: 18 fetches of one zone in four
+    // minutes, 37% of all getarea traffic in that session redundant. A base
+    // id cannot go stale inside 15s, which is the same floor refetchZones
+    // uses for its own forced path.
+    const fetchedAt = this.loadedZones.get(key);
+    if (fetchedAt !== undefined && Date.now() - fetchedAt < ZONE_RELOAD_MIN_AGE_MS) {
       return false;
     }
-    this.mergeZoneResponse(response);
-    this.loadedZones.set(key, Date.now());
-    this.markZoneDirty(key);
-    this.render();
-    this.schedulePersistExploredCache();
-    return true;
+
+    const work = (async () => {
+      const response = await this.api.getArea(
+        this.token, zone.x, zone.y, this.zoneScope(), priority,
+      );
+      // A world switch / sign-out mid-flight invalidates this response.
+      if (!this.token) {
+        return false;
+      }
+      this.mergeZoneResponse(response);
+      this.loadedZones.set(key, Date.now());
+      this.markZoneDirty(key);
+      this.render();
+      this.schedulePersistExploredCache();
+      return true;
+    })();
+
+    this.zoneReloadsInFlight.set(key, work);
+    try {
+      return await work;
+    } finally {
+      this.zoneReloadsInFlight.delete(key);
+    }
   }
 
   // Force-refetches specific zones (used by the watchlist auto-refresh).
@@ -2132,10 +2570,12 @@ export class MapRenderer {
         const cKey = cellKey(x, y);
         const previous = this.cellCache.get(cKey) || null;
         const current = this.normalizeCell(x, y, rawCell);
-        this.cellCache.set(cKey, current);
-        if (previous && Number(previous.uid || 0) !== Number(current.uid || 0)) {
+        if (this.applyChangeTracking(previous, current)) {
           ownershipChanges.push({ x, y, previous, current });
         }
+        this.cellCache.set(cKey, current);
+        this.cacheVersion += 1;
+        this.worldBitmapDirty.push(current);
       }
       this.loadedZones.set(key, fetchedAt);
       applied += 1;
@@ -2203,16 +2643,42 @@ export class MapRenderer {
   }
 
   // ------------------------------------------------------------------
-  // Measure tool: two clicks pick endpoints; distance uses the same
-  // wrap-aware odd-q metric as the game.
+  // Measure tool: click to place a first point, click again to finish the
+  // measurement; any number of measurements can coexist. Clicking a cell
+  // that already holds an endpoint picks that point up and it follows the
+  // mouse until dropped on another cell. Distances use the same wrap-aware
+  // odd-q metric as the game. Everything clears when the mode toggles.
   // ------------------------------------------------------------------
   setMeasureMode(enabled) {
     this.measureMode = Boolean(enabled);
-    if (!this.measureMode) {
-      this.measurePoints = [];
-      this.notifyMeasureUpdated();
-    }
+    // Both directions start clean: toggling the button off wipes every
+    // measurement, and toggling it on never resurrects an old set.
+    this.measurements = [];
+    this.measureDraft = null;
+    this.measureCarry = null;
+    // The dedicated cursor signals the mode even before the first click;
+    // the little ruler drawn beside it comes from drawMeasureOverlay.
+    this.canvas.style.cursor = this.measureMode ? "crosshair" : "";
+    this.notifyMeasureUpdated();
     this.render();
+  }
+
+  // Topmost endpoint occupying this cell: the draft first, then newer
+  // measurements over older ones.
+  findMeasurePointAt(gridCell) {
+    if (this.measureDraft &&
+        this.measureDraft.x === gridCell.x && this.measureDraft.y === gridCell.y) {
+      return { draft: true };
+    }
+    for (let index = this.measurements.length - 1; index >= 0; index -= 1) {
+      for (const end of ["b", "a"]) {
+        const point = this.measurements[index][end];
+        if (point.x === gridCell.x && point.y === gridCell.y) {
+          return { index, end };
+        }
+      }
+    }
+    return null;
   }
 
   handleMeasureClick(gridCell) {
@@ -2220,10 +2686,38 @@ export class MapRenderer {
       return;
     }
 
-    if (this.measurePoints.length >= 2) {
-      this.measurePoints = [];
+    if (this.measureCarry) {
+      // Drop the carried point on this cell.
+      const measurement = this.measurements[this.measureCarry.index];
+      if (measurement) {
+        measurement[this.measureCarry.end] = { x: gridCell.x, y: gridCell.y };
+      }
+      this.measureCarry = null;
+    } else if (this.measureDraft) {
+      if (this.measureDraft.x === gridCell.x && this.measureDraft.y === gridCell.y) {
+        // Clicking the pending point lifts it again - the hand is empty and
+        // the next click places it fresh.
+        this.measureDraft = null;
+      } else {
+        // Second click completes the measurement - even on a cell that
+        // already holds another measurement's endpoint, since measuring
+        // to a shared landmark is legitimate.
+        this.measurements.push({
+          a: this.measureDraft,
+          b: { x: gridCell.x, y: gridCell.y },
+        });
+        this.measureDraft = null;
+      }
+    } else {
+      const picked = this.findMeasurePointAt(gridCell);
+      if (picked && !picked.draft) {
+        // Pick the point up; it follows the mouse until the next click.
+        this.measureCarry = { index: picked.index, end: picked.end };
+      } else {
+        this.measureDraft = { x: gridCell.x, y: gridCell.y };
+      }
     }
-    this.measurePoints.push({ x: gridCell.x, y: gridCell.y });
+
     this.notifyMeasureUpdated();
     this.render();
   }
@@ -2233,68 +2727,195 @@ export class MapRenderer {
       return;
     }
 
-    const [a, b] = this.measurePoints;
+    let mode = "idle";
+    if (this.measureCarry) {
+      mode = "carry";
+    } else if (this.measureDraft) {
+      mode = "draft";
+    }
     this.onMeasureUpdated({
-      a: a || null,
-      b: b || null,
-      distance: a && b ? this.getWrappedHexDistance(a.x, a.y, b.x, b.y) : null,
+      mode,
+      count: this.measurements.length,
+      draft: this.measureDraft ? { ...this.measureDraft } : null,
     });
   }
 
   drawMeasureOverlay() {
-    if (!this.measureMode || !this.measurePoints.length) {
+    if (!this.measureMode) {
       return;
     }
 
     const width = this.canvas.clientWidth || 1;
     const height = this.canvas.clientHeight || 1;
-    let anchorX = this.offsetX + width / (2 * this.zoom);
-    let anchorY = this.offsetY + height / (2 * this.zoom);
-    const points = this.measurePoints.map((point) => {
+    const periodX = this.getWorldPeriodX();
+    const periodY = this.getWorldPeriodY();
+
+    // Projects a grid cell to screen px, wrap-resolved against an anchor so
+    // a line never draws the long way around the torus. The anchor defaults
+    // to the view centre; passing the line's other endpoint keeps both ends
+    // on the same wrap copy.
+    const projectCell = (point, anchor = null) => {
+      const anchorX = anchor ? anchor.worldX : this.offsetX + width / (2 * this.zoom);
+      const anchorY = anchor ? anchor.worldY : this.offsetY + this.viewWorldHeight(height) / 2;
       const world = this.cellToWorld(point.x, point.y);
-      const worldX = this.nearestWrappedValue(world.x + MR2.cellWidth / 2, anchorX, this.getWorldPeriodX());
-      const worldY = this.nearestWrappedValue(world.y + MR2.cellHeight / 2, anchorY, this.getWorldPeriodY());
-      anchorX = worldX;
-      anchorY = worldY;
+      const worldX = this.nearestWrappedValue(world.x + MR2.cellWidth / 2, anchorX, periodX);
+      const worldY = this.nearestWrappedValue(world.y + MR2.cellHeight / 2, anchorY, periodY);
       return {
+        worldX,
+        worldY,
         x: (worldX - this.offsetX) * this.zoom,
         y: (worldY - this.offsetY) * this.zoom,
       };
+    };
+
+    const ctx = this.ctx;
+    const dotRadius = Math.max(4, 6 * this.zoom);
+    const font = `bold ${Math.max(12, 13 * this.zoom)}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
+
+    const drawDot = (point, { ghost = false } = {}) => {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, dotRadius, 0, Math.PI * 2);
+      ctx.fillStyle = ghost ? "rgba(255, 170, 60, 0.45)" : "rgba(255, 170, 60, 0.95)";
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+      ctx.setLineDash([]);
+      ctx.stroke();
+    };
+
+    const drawLine = (from, to, { live = false } = {}) => {
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.lineWidth = Math.max(2, 2.6 * this.zoom);
+      ctx.strokeStyle = live ? "rgba(255, 200, 110, 0.9)" : "rgba(255, 170, 60, 0.95)";
+      ctx.setLineDash([8 * this.zoom, 5 * this.zoom]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+
+    const drawLabel = (text, x, y) => {
+      ctx.font = font;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = "#ffd9a0";
+      ctx.fillText(text, x, y);
+    };
+
+    ctx.save();
+
+    const pointerRaw = this.measurePointerInside ? this.lastPointer : null;
+    // The overlay draws inside the mcBG transform (Y scaled by MCBG_ASPECT),
+    // so the CSS-pixel pointer must be unstretched before it can share a
+    // line with projected cells.
+    const pointer = pointerRaw
+      ? { x: pointerRaw.x, y: pointerRaw.y / MCBG_ASPECT }
+      : null;
+    const pointerCell = pointerRaw
+      ? this.findGridCellAtPoint(pointerRaw.x, pointerRaw.y)
+      : null;
+
+    // Completed measurements. A measurement whose endpoint is currently in
+    // hand draws as a rubber band from its fixed end to the mouse instead.
+    this.measurements.forEach((measurement, index) => {
+      const carried = this.measureCarry && this.measureCarry.index === index
+        ? this.measureCarry.end
+        : null;
+
+      if (!carried) {
+        const pointA = projectCell(measurement.a);
+        const pointB = projectCell(measurement.b, pointA);
+        drawLine(pointA, pointB);
+        drawDot(pointA);
+        drawDot(pointB);
+        drawLabel(
+          `${this.getWrappedHexDistance(measurement.a.x, measurement.a.y, measurement.b.x, measurement.b.y)} cells`,
+          (pointA.x + pointB.x) / 2,
+          (pointA.y + pointB.y) / 2 - 10,
+        );
+        return;
+      }
+
+      const fixed = measurement[carried === "a" ? "b" : "a"];
+      const fixedPoint = projectCell(fixed);
+      drawDot(fixedPoint);
+      if (pointer) {
+        drawLine(fixedPoint, pointer, { live: true });
+        drawDot(pointer, { ghost: true });
+        if (pointerCell) {
+          drawLabel(
+            `${this.getWrappedHexDistance(fixed.x, fixed.y, pointerCell.x, pointerCell.y)} cells`,
+            (fixedPoint.x + pointer.x) / 2,
+            (fixedPoint.y + pointer.y) / 2 - 10,
+          );
+        }
+      }
     });
 
-    this.ctx.save();
-    this.ctx.strokeStyle = "rgba(255, 170, 60, 0.95)";
-    this.ctx.fillStyle = "rgba(255, 170, 60, 0.95)";
-    this.ctx.lineWidth = Math.max(2, 2.6 * this.zoom);
-    this.ctx.setLineDash([8 * this.zoom, 5 * this.zoom]);
-
-    for (const point of points) {
-      this.ctx.beginPath();
-      this.ctx.arc(point.x, point.y, Math.max(4, 6 * this.zoom), 0, Math.PI * 2);
-      this.ctx.fill();
+    // In-progress measurement: first point placed, second end following the
+    // mouse with a live cell count.
+    if (this.measureDraft) {
+      const draftPoint = projectCell(this.measureDraft);
+      drawDot(draftPoint);
+      if (pointer) {
+        drawLine(draftPoint, pointer, { live: true });
+        if (pointerCell) {
+          drawLabel(
+            `${this.getWrappedHexDistance(this.measureDraft.x, this.measureDraft.y, pointerCell.x, pointerCell.y)} cells`,
+            (draftPoint.x + pointer.x) / 2,
+            (draftPoint.y + pointer.y) / 2 - 10,
+          );
+        }
+      }
     }
 
-    if (points.length === 2) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(points[0].x, points[0].y);
-      this.ctx.lineTo(points[1].x, points[1].y);
-      this.ctx.stroke();
-
-      const [a, b] = this.measurePoints;
-      const label = `${this.getWrappedHexDistance(a.x, a.y, b.x, b.y)} cells`;
-      const midX = (points[0].x + points[1].x) / 2;
-      const midY = (points[0].y + points[1].y) / 2 - 10;
-      this.ctx.setLineDash([]);
-      this.ctx.font = `bold ${Math.max(12, 13 * this.zoom)}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
-      this.ctx.textAlign = "center";
-      this.ctx.lineWidth = 4;
-      this.ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
-      this.ctx.strokeText(label, midX, midY);
-      this.ctx.fillStyle = "#ffd9a0";
-      this.ctx.fillText(label, midX, midY);
+    // Small ruler beside the pointer whenever measure mode is armed, so the
+    // mode is visible even before the first click. Raw CSS px on purpose:
+    // the glyph resets to a uniform transform so it is never aspect-warped.
+    if (pointerRaw) {
+      this.drawMeasureCursorRuler(pointerRaw.x + 16, pointerRaw.y + 12);
     }
 
-    this.ctx.restore();
+    ctx.restore();
+  }
+
+  // A tilted ruler glyph (rounded body + tick marks) drawn in screen space
+  // next to the mouse. Fixed size on purpose: it is cursor adornment, not
+  // map content, so it must not scale with zoom.
+  drawMeasureCursorRuler(x, y) {
+    const ctx = this.ctx;
+    ctx.save();
+    // Cursor adornment lives in plain CSS-pixel space: the surrounding
+    // overlay transform carries the mcBG vertical stretch, which would both
+    // misplace the glyph and shear its rotation.
+    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+    ctx.translate(x, y);
+    ctx.rotate(-Math.PI / 5);
+    const bodyWidth = 26;
+    const bodyHeight = 11;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === "function") {
+      ctx.roundRect(0, 0, bodyWidth, bodyHeight, 2.5);
+    } else {
+      ctx.rect(0, 0, bodyWidth, bodyHeight);
+    }
+    ctx.fillStyle = "rgba(255, 208, 130, 0.95)";
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(60, 38, 8, 0.9)";
+    ctx.stroke();
+    ctx.beginPath();
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const tickX = (bodyWidth / 5) * tick;
+      ctx.moveTo(tickX, 0);
+      ctx.lineTo(tickX, tick % 2 ? bodyHeight * 0.45 : bodyHeight * 0.62);
+    }
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Jumps the camera to arbitrary coordinates, even if the cell has not
@@ -2419,6 +3040,18 @@ export class MapRenderer {
   }
 
   // Aggregates everything known about a player from the explored cache.
+  /**
+   * The cached cell at (x, y), regardless of who owns it.
+   *
+   * getPlayerProfile() is scoped to one player AND returns null outright when
+   * any of that player's cells is hidden, so it is the wrong lookup for
+   * "what is the terrain here" - it answers "nothing" for cases where the
+   * cache plainly holds the cell.
+   */
+  getCachedCell(x, y) {
+    return this.cellCache.get(cellKey(Number(x), Number(y))) || null;
+  }
+
   getPlayerProfile(ownerId) {
     const uid = Number(ownerId || 0);
     if (uid <= 0) {
@@ -2495,10 +3128,21 @@ export class MapRenderer {
     return counts;
   }
 
+  /**
+   * Viewport height in world units. Vertical extent is not simply px/zoom any
+   * more: the mcBG matrix stretches the map ~6% vertically at draw time, so a
+   * given number of screen pixels covers proportionally fewer world rows.
+   */
+  viewWorldHeight(pixels) {
+    return (pixels / MCBG_ASPECT) / this.zoom;
+  }
+
   screenToWorld(screenX, screenY) {
     return {
       x: this.offsetX + screenX / this.zoom,
-      y: this.offsetY + screenY / this.zoom,
+      // Undo the mcBG vertical stretch applied at draw time, so a pointer
+      // position maps back to the cell that is actually under it.
+      y: this.offsetY + (screenY / MCBG_ASPECT) / this.zoom,
     };
   }
 
@@ -2544,6 +3188,75 @@ export class MapRenderer {
   // frame; the deferred draw always reads current state, so batching never
   // shows stale frames. High-poll-rate mice used to trigger several full
   // redraws per displayed frame during drags.
+  // Full-fidelity offscreen render for exports: the real draw pipeline
+  // (both LODs, tiles, markers, labels, highlights, disguises) pointed at
+  // a target canvas with an explicit camera, then everything restored.
+  renderToCanvas(target, { offsetX, offsetY, zoom, forceDetailed = false }) {
+    // Re-entrancy guard: this method swaps live renderer state (ctx,
+    // canvas, camera, dpr) and restores it in finally. A nested or
+    // concurrent call would restore the FIRST call's saved state on top of
+    // the second's, leaving the live view pointed at a dead canvas.
+    if (this.exportRenderInFlight) {
+      throw new Error("An export render is already running - wait for it to finish.");
+    }
+    this.exportRenderInFlight = true;
+    const saved = {
+      ctx: this.ctx,
+      canvas: this.canvas,
+      offsetX: this.offsetX,
+      offsetY: this.offsetY,
+      zoom: this.zoom,
+      viewportWidth: this.viewportWidth,
+      viewportHeight: this.viewportHeight,
+    };
+    const width = target.width;
+    const height = target.height;
+    // Not in the DOM, so give it a rect; force dpr 1 so pixels match 1:1.
+    target.getBoundingClientRect = () => ({ left: 0, top: 0, width, height });
+    let dprRestore = null;
+    try {
+      const dprDesc = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+      Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+      dprRestore = () => {
+        if (dprDesc) Object.defineProperty(window, "devicePixelRatio", dprDesc);
+        else delete window.devicePixelRatio;
+      };
+    } catch { dprRestore = null; }
+    try {
+      this.canvas = target;
+      this.forceDetailedExport = forceDetailed;
+      this.ctx = target.getContext("2d", { alpha: false });
+      this.offsetX = offsetX;
+      this.offsetY = offsetY;
+      this.zoom = zoom;
+      // Pre-set the viewport so the resize compensation doesn't shift the
+      // camera we just placed.
+      this.viewportWidth = width;
+      this.viewportHeight = height;
+      this.renderNow();
+    } finally {
+      if (dprRestore) dprRestore();
+      this.exportRenderInFlight = false;
+      this.forceDetailedExport = false;
+      this.ctx = saved.ctx;
+      this.canvas = saved.canvas;
+      this.offsetX = saved.offsetX;
+      this.offsetY = saved.offsetY;
+      this.zoom = saved.zoom;
+      this.viewportWidth = saved.viewportWidth;
+      this.viewportHeight = saved.viewportHeight;
+      this.render();
+    }
+  }
+
+  isDetailedZoom() {
+    return this.zoom >= LOD_SIMPLE_ZOOM;
+  }
+
+  detailedMinZoom() {
+    return LOD_SIMPLE_ZOOM;
+  }
+
   render() {
     if (this.renderQueued) {
       return;
@@ -2573,9 +3286,9 @@ export class MapRenderer {
       (previousWidth !== width || previousHeight !== height)
     ) {
       const centerWorldX = this.offsetX + previousWidth / (2 * this.zoom);
-      const centerWorldY = this.offsetY + previousHeight / (2 * this.zoom);
+      const centerWorldY = this.offsetY + this.viewWorldHeight(previousHeight) / 2;
       this.offsetX = centerWorldX - width / (2 * this.zoom);
-      this.offsetY = centerWorldY - height / (2 * this.zoom);
+      this.offsetY = centerWorldY - this.viewWorldHeight(height) / 2;
       this.clampOffset();
     }
 
@@ -2597,28 +3310,72 @@ export class MapRenderer {
     }
 
     this.drawBackground(width, height);
-    const visibleCells = this.getVisibleCells(width, height);
+
+    // Everything from here is _cellContainer, which lives inside mcBG and so
+    // inherits its matrix. Applied once, around the whole composition, exactly
+    // as the client does - not folded into per-cell maths. Only the ratio is
+    // visible (a uniform component is indistinguishable from zoom), so the X
+    // scale stays 1 and Y carries MCBG_ASPECT.
+    this.ctx.save();
+    this.ctx.setTransform(dpr, 0, 0, dpr * MCBG_ASPECT, 0, 0);
+
+    // Simplified view: the terrain comes from a prerendered world bitmap and
+    // only base cells are enumerated, so the per-frame grid scan - by far the
+    // largest cost at this zoom - does not happen at all.
+    const visibleCells = this.zoom < LOD_SIMPLE_ZOOM
+      ? []
+      : this.getVisibleCells(width, height);
 
     this.pendingMainLabels.length = 0;
     if (this.guestMode) {
       this.drawUncachedZones(width, height);
     }
-    this.drawTerrainBatched(visibleCells);
-    this.drawOwnedRangeOverlays(width, height);
+    if (this.zoom < LOD_SIMPLE_ZOOM && !this.forceDetailedExport) {
+      this.drawWorldBitmap(width, height);
+      // Flinger reach reads on the far-zoom bitmap only: one combined
+      // path, one fill, so adjacent cells can't stack their alpha.
+      this.drawOwnFlingerRange(width, height);
+    } else {
+      this.drawTerrainBatched(visibleCells);
+      this.drawGlowPass(visibleCells);
+    }
 
-    visibleCells.sort((left, right) => (left.cellY - right.cellY) || (left.cellX - right.cellX));
-    for (const entry of visibleCells) {
+    // MapRoomPopup's own depth sort: cell.depth = cell.y * 1000 + cell.x, on
+    // the FLAT staggered position. Sorting by cellY alone ignores the 37.5px
+    // odd-column stagger, so an odd column drew behind the even column beside
+    // it even though it sits lower on screen.
+    //
+    // Skipped entirely in the simplified view: it is flat and its markers do
+    // not overlap, so paint order carries no information there - and that is
+    // exactly the zoom with the most cells to sort.
+    if (this.zoom >= LOD_SIMPLE_ZOOM) {
+      // Key precomputed once per cell rather than derived inside the
+      // comparator, which was allocating two objects per comparison.
+      for (const entry of visibleCells) {
+        entry.depth = entry.cellY * MR2.cellHeight
+          + (entry.cellX % 2 ? MR2.oddColumnOffset : 0) + entry.cellX / 100000;
+      }
+      visibleCells.sort((left, right) => left.depth - right.depth);
+    }
+    for (const entry of (this.zoom < LOD_SIMPLE_ZOOM
+      ? this.visibleBaseCells(width, height)
+      : visibleCells)) {
       this.drawCellContents(entry);
     }
 
     this.drawJumpMarker();
     this.drawMeasureOverlay();
     this.drawPendingMainLabels();
+    this.ctx.restore();
   }
 
   // Ally mains get a label shadow in the ally color, enemy mains in enemy
   // red; everyone else keeps the default black shadow.
   getMainLabelStrokeColor(cell) {
+    // Your own main reads in your map blue at every LOD.
+    if (Number(cell.mine || 0) === 1) {
+      return "rgba(90, 169, 255, 0.95)";
+    }
     const role = this.getPlayerHighlightColor(cell);
     if (role === "ally") {
       return ALLY_STROKE;
@@ -2627,6 +3384,68 @@ export class MapRenderer {
       return ENEMY_STROKE;
     }
     return "rgba(0, 0, 0, 0.7)";
+  }
+
+  // MR2's flinger reach, straight from ApplyRangeHighlighting: the map is
+  // an odd-q offset HEX grid, and a base covers every cell within hex
+  // distance getFlingerRange(f, isMain) = isMain ? 2 + 2f : f. Cells in
+  // range of any of your bases get a light wash.
+  computeOwnFlingerRange() {
+    this.ownRangeDirty = false;
+    const cells = new Set();
+    const toCube = (x, y) => {
+      const q = x;
+      const r = y - (x - (x & 1)) / 2;
+      return { q, r };
+    };
+    for (const cell of this.cellCache.values()) {
+      if (Number(cell.mine || 0) !== 1) continue;
+      const bt = Number(cell.b);
+      const isMain = bt === MR2.yardTypes.main;
+      if (!isMain && bt !== MR2.yardTypes.outpost) continue;
+      const f = Number(cell.f) || 0;
+      const range = isMain ? 2 + 2 * f : f;
+      if (range <= 0) continue;
+      const c0 = toCube(Number(cell.x), Number(cell.y));
+      for (let dq = -range; dq <= range; dq++) {
+        const lo = Math.max(-range, -dq - range);
+        const hi = Math.min(range, -dq + range);
+        for (let dr = lo; dr <= hi; dr++) {
+          const q = c0.q + dq;
+          const r = c0.r + dr;
+          const x = q;
+          const y = r + (q - (q & 1)) / 2;
+          cells.add(`${x},${y}`);
+        }
+      }
+    }
+    this.ownRangeCells = cells;
+  }
+
+  drawOwnFlingerRange(width, height) {
+    if (this.zoom >= LOD_SIMPLE_ZOOM) return;
+    if (this.ownRangeDirty || !this.ownRangeCells) this.computeOwnFlingerRange();
+    if (!this.ownRangeCells.size) return;
+    const cw = MR2.cellWidth * this.zoom;
+    const chh = MR2.cellHeight * this.zoom;
+    this.ctx.save();
+    this.ctx.beginPath();
+    for (const key of this.ownRangeCells) {
+      const [cx, cy] = key.split(",").map(Number);
+      const world = this.cellToWorld(cx, cy);
+      const worldX = this.nearestWrappedValue(
+        world.x, this.offsetX + width / (2 * this.zoom), this.getWorldPeriodX());
+      const worldY = this.nearestWrappedValue(
+        world.y, this.offsetY + this.viewWorldHeight(height) / 2, this.getWorldPeriodY());
+      const sx = (worldX - this.offsetX) * this.zoom;
+      const sy = (worldY - this.offsetY) * this.zoom;
+      if (sx + cw < 0 || sy + chh < 0 || sx > width || sy > height) continue;
+      this.ctx.rect(sx, sy, cw, chh);
+    }
+    // Single nonzero fill: overlapping rects lighten exactly once.
+    this.ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+    this.ctx.fill();
+    this.ctx.restore();
   }
 
   drawPendingMainLabels() {
@@ -2650,7 +3469,7 @@ export class MapRenderer {
     );
     const worldY = this.nearestWrappedValue(
       world.y,
-      this.offsetY + height / (2 * this.zoom),
+      this.offsetY + this.viewWorldHeight(height) / 2,
       this.getWorldPeriodY(),
     );
     const screenX = (worldX - this.offsetX) * this.zoom;
@@ -2700,6 +3519,181 @@ export class MapRenderer {
   // entry pairs the cached cell (wrapped map coords) with the unwrapped grid
   // position it should be drawn at, so cells render on both sides of the
   // wrap seam.
+  /**
+   * The whole world's simplified terrain, prerendered once per cache change.
+   *
+   * Resolution is one pixel per COLUMN and two per ROW - 800 x 1600 for a
+   * standard world, ~5 MB. That is not a compromise, it is exact: the
+   * simplified view paints one flat band colour per cell, so a pixel per cell
+   * is lossless, and two rows per cell is the minimum that can express the
+   * 37.5px odd-column stagger (exactly half a row) without rounding. A larger
+   * buffer - 3200 x 3200, say - would store each cell as a 4x4 block of
+   * identical pixels: 16x the memory for no additional information.
+   *
+   * Drawn with smoothing off, so cells land as crisp blocks. Blockiness is
+   * correct here rather than an artifact: a simplified cell IS a flat
+   * rectangle of one colour, which is what the per-cell fillRect drew.
+   */
+  buildWorldBitmap() {
+    const mapWidth = this.getMapWidth();
+    const mapHeight = this.getMapHeight();
+    const w = mapWidth;
+    const h = mapHeight * 2;
+    if (!this.worldBitmap || this.worldBitmap.width !== w || this.worldBitmap.height !== h) {
+      this.worldBitmap = document.createElement("canvas");
+      this.worldBitmap.width = w;
+      this.worldBitmap.height = h;
+    }
+    const ctx = this.worldBitmap.getContext("2d", { willReadFrequently: false });
+    const image = ctx.createImageData(w, h);
+    const data = image.data;
+
+    // Band colours resolved once, not per cell.
+    const rgb = TERRAIN_BANDS.map((band) => {
+      const hex = band.fill.replace("#", "");
+      return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+    });
+    const bandFor = (height) => {
+      for (let i = 0; i < TERRAIN_BANDS.length; i += 1) {
+        if (height < TERRAIN_BANDS[i].max) return i;
+      }
+      return TERRAIN_BANDS.length - 1;
+    };
+
+    for (const cell of this.cellCache.values()) {
+      const x = Number(cell.x);
+      const y = Number(cell.y);
+      if (x < 0 || x >= mapWidth || y < 0 || y >= mapHeight) {
+        continue;
+      }
+      const [r, g, b] = rgb[bandFor(this.terrainHeightFor(cell))];
+      // Two source rows per cell; odd columns start half a cell lower.
+      const top = y * 2 + (x % 2 ? 1 : 0);
+      for (let row = 0; row < 2; row += 1) {
+        const py = (top + row) % h;
+        const offset = (py * w + x) * 4;
+        data[offset] = r;
+        data[offset + 1] = g;
+        data[offset + 2] = b;
+        data[offset + 3] = 255;
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+    this.worldBitmapVersion = this.cacheVersion;
+    return this.worldBitmap;
+  }
+
+  worldBitmapFor() {
+    if (this.worldBitmap && this.worldBitmapVersion === this.cacheVersion) {
+      return this.worldBitmap;
+    }
+    if (this.worldBitmap && this.worldBitmapDirty.length
+        && this.worldBitmapDirty.length <= WORLD_BITMAP_PATCH_LIMIT) {
+      this.patchWorldBitmap(this.worldBitmapDirty);
+      this.worldBitmapDirty = [];
+      this.worldBitmapVersion = this.cacheVersion;
+      return this.worldBitmap;
+    }
+    this.buildWorldBitmap();
+    this.worldBitmapDirty = [];
+    return this.worldBitmap;
+  }
+
+  /** Repaints just the cells that changed since the last build. */
+  patchWorldBitmap(cells) {
+    const ctx = this.worldBitmap.getContext("2d");
+    const mapWidth = this.getMapWidth();
+    const mapHeight = this.getMapHeight();
+    for (const cell of cells) {
+      const x = Number(cell.x);
+      const y = Number(cell.y);
+      if (x < 0 || x >= mapWidth || y < 0 || y >= mapHeight) {
+        continue;
+      }
+      ctx.fillStyle = getTerrainBand(this.terrainHeightFor(cell)).fill;
+      ctx.fillRect(x, y * 2 + (x % 2 ? 1 : 0), 1, 2);
+    }
+  }
+
+  /**
+   * Blits the world bitmap over the viewport, repeating across the torus
+   * seam the same way the background does.
+   */
+  drawWorldBitmap(width, height) {
+    const bitmap = this.worldBitmapFor();
+    if (!bitmap) {
+      return;
+    }
+    const periodX = this.getWorldPeriodX();
+    const periodY = this.getWorldPeriodY();
+    const worldW = periodX * this.zoom;
+    const worldH = periodY * this.zoom;
+    if (worldW <= 0 || worldH <= 0) {
+      return;
+    }
+    const startX = -this.offsetX * this.zoom;
+    const startY = -this.offsetY * this.zoom;
+    const viewH = this.viewWorldHeight(height) * this.zoom;
+
+    const smoothing = this.ctx.imageSmoothingEnabled;
+    this.ctx.imageSmoothingEnabled = false;
+    let originX = startX - Math.ceil(startX / worldW) * worldW;
+    for (let x = originX; x < width; x += worldW) {
+      let originY = startY - Math.ceil(startY / worldH) * worldH;
+      for (let y = originY; y < viewH; y += worldH) {
+        this.ctx.drawImage(bitmap, x, y, worldW, worldH);
+      }
+    }
+    this.ctx.imageSmoothingEnabled = smoothing;
+  }
+
+  /**
+   * Base cells only, for the simplified view's markers. Wild tribes are not
+   * drawn at that zoom, so this is a few thousand entries at most instead of
+   * the ~110,000 the grid scan produced.
+   */
+  visibleBaseCells(width, height) {
+    if (this.baseCellVersion !== this.cacheVersion) {
+      this.baseCellIndex = [];
+      for (const cell of this.cellCache.values()) {
+        const type = Number(cell.b);
+        if (type === MR2.yardTypes.main || type === MR2.yardTypes.outpost) {
+          this.baseCellIndex.push({ cell, cellX: Number(cell.x), cellY: Number(cell.y) });
+        }
+      }
+      this.baseCellVersion = this.cacheVersion;
+    }
+    if (width === undefined) {
+      return this.baseCellIndex;
+    }
+
+    // The world is a torus and the viewport can straddle the seam, so a base
+    // near x = 799 has to be drawn again at x = -1 when the camera is looking
+    // across the join. The grid scan used to produce those repeats for free
+    // because it iterated unwrapped coordinates; enumerating the cache does
+    // not, so the copies are emitted here.
+    const bounds = this.getVisibleCellBounds(width, height);
+    const mapWidth = this.getMapWidth();
+    const mapHeight = this.getMapHeight();
+    const out = [];
+    for (const entry of this.baseCellIndex) {
+      for (let dx = Math.floor(bounds.minX / mapWidth); dx <= Math.floor(bounds.maxX / mapWidth); dx += 1) {
+        const cellX = entry.cellX + dx * mapWidth;
+        if (cellX < bounds.minX || cellX > bounds.maxX) {
+          continue;
+        }
+        for (let dy = Math.floor(bounds.minY / mapHeight); dy <= Math.floor(bounds.maxY / mapHeight); dy += 1) {
+          const cellY = entry.cellY + dy * mapHeight;
+          if (cellY < bounds.minY || cellY > bounds.maxY) {
+            continue;
+          }
+          out.push({ cell: entry.cell, cellX, cellY });
+        }
+      }
+    }
+    return out;
+  }
+
   getVisibleCells(width, height) {
     const bounds = this.getVisibleCellBounds(width, height);
     const mapWidth = this.getMapWidth();
@@ -2790,7 +3784,7 @@ export class MapRenderer {
       bucket.cells.push(entry);
     }
 
-    if (this.zoom < LOD_SIMPLE_ZOOM) {
+    if (this.zoom < LOD_SIMPLE_ZOOM && !this.forceDetailedExport) {
       // Simplified terrain: one rectangle per cell, batched per band. The hex
       // silhouette is invisible at this scale and rects are far cheaper.
       for (const bucket of byBand.values()) {
@@ -2799,7 +3793,12 @@ export class MapRenderer {
           const world = this.cellToWorld(entry.cellX, entry.cellY);
           this.ctx.fillRect(
             (world.x - this.offsetX) * this.zoom,
-            (world.y - this.offsetY) * this.zoom,
+            // Simplified view is deliberately FLAT: every cell sits on its own
+            // row at a uniform height (liftFor returns 0 below the LOD
+            // threshold). Relief at these zooms turns a tidy grid into a
+            // ragged one for a few pixels of depth that read as noise. Only
+            // the geometry is flattened - band colours are untouched.
+            (world.y - this.offsetY + this.liftFor(entry.cell)) * this.zoom,
             MR2.cellWidth * this.zoom + 1,
             MR2.cellHeight * this.zoom + 1,
           );
@@ -2808,12 +3807,19 @@ export class MapRenderer {
       return;
     }
 
+    // Zoomed in: the game's own painted terrain bitmaps.
+    this.terrainTilesDrawn = this.drawTerrainTiles(entries);
+    if (this.terrainTilesDrawn) {
+      return;
+    }
+
+    // Fallback while the tile art is still loading - the flat band fills.
     for (const bucket of byBand.values()) {
       this.ctx.beginPath();
       for (const entry of bucket.cells) {
         const world = this.cellToWorld(entry.cellX, entry.cellY);
         const screenX = (world.x - this.offsetX) * this.zoom;
-        const screenY = (world.y - this.offsetY) * this.zoom;
+        const screenY = (world.y - this.offsetY + this.liftFor(entry.cell)) * this.zoom;
         this.appendHexPath(screenX, screenY, CELL_HEX_VERTICES);
       }
       this.ctx.fillStyle = bucket.band.fill;
@@ -2826,142 +3832,257 @@ export class MapRenderer {
     }
   }
 
+  /**
+   * The cell's vertical artwork offset (MapRoomCell.Update's mc.y).
+   *
+   * Zero in the simplified view, which is deliberately flat. Putting the test
+   * here rather than at each call site keeps drawing and HIT TESTING in
+   * agreement - a flat grid that was still hit-tested against lifted hexes
+   * would mis-target by up to most of a row.
+   */
+  liftFor(cell) {
+    if (this.zoom < LOD_SIMPLE_ZOOM && !this.forceDetailedExport) {
+      return 0;
+    }
+    return cellLift(this.terrainHeightFor(cell));
+  }
+
+  /**
+   * Terrain as the game draws it: eleven painted 151x101 bitmaps, one per
+   * height band, composited back-to-front.
+   *
+   * Order is not optional here. A 101px-tall tile against a 75px row pitch
+   * overhangs the row below by 26px, and elevation relief widens that further,
+   * so the painter's sort is what keeps the overlaps right. The game does the
+   * same with `cell.depth = cell.y * 1000 + cell.x` - note that is the FLAT
+   * staggered y, before mc.y relief, so a raised cell never jumps its row.
+   *
+   * Returns false if any needed tile has not loaded yet, so the caller can
+   * fall back to flat fills rather than drawing a half-tiled map.
+   */
+  drawTerrainTiles(entries) {
+    const ordered = entries
+      .map((entry) => {
+        const world = this.cellToWorld(entry.cellX, entry.cellY);
+        return { entry, world, depth: world.y * 1000 + world.x };
+      })
+      .sort((left, right) => left.depth - right.depth);
+
+    const tiles = new Map();
+    for (const item of ordered) {
+      const frame = terrainFrameFor(this.terrainHeightFor(item.entry.cell));
+      if (!tiles.has(frame)) {
+        tiles.set(frame, this.assets.get(TERRAIN_TILE_PATH + frame + ".png"));
+      }
+      item.frame = frame;
+    }
+    if ([...tiles.values()].some((image) => !image)) {
+      return false;
+    }
+
+    for (const item of ordered) {
+      const height = this.terrainHeightFor(item.entry.cell);
+      const screenX = (item.world.x - this.offsetX) * this.zoom;
+      const screenY = (item.world.y - this.offsetY + cellLift(height)) * this.zoom;
+      this.ctx.drawImage(
+        tiles.get(item.frame),
+        screenX, screenY,
+        TERRAIN_TILE_W * this.zoom, TERRAIN_TILE_H * this.zoom,
+      );
+      // The cyan surface plane rides on a fixed plane while the bed sinks,
+      // which is what makes deep water read darker.
+      if (height < 100) {
+        const surfaceY = (item.world.y - this.offsetY + cellLift(height)
+          + waterSurfaceLift(height)) * this.zoom;
+        this.ctx.fillStyle = WATER_SURFACE_FILL;
+        this.ctx.beginPath();
+        this.appendHexPath(screenX, surfaceY, CELL_HEX_VERTICES);
+        this.ctx.fill();
+      }
+      // mcGlow is depth 3 INSIDE this cell's mc, so it belongs in the
+      // per-cell painter order - not in a pass of its own after all the
+      // terrain. Drawn separately, a glow on a cell further back painted over
+      // the terrain of a taller cell in front of it; here the next cell's
+      // tile covers it, exactly as the client composites.
+      const glow = this.getGlowState(item.entry.cell);
+      if (glow) {
+        this.drawGlow(glow, screenX, screenY);
+      }
+    }
+    return true;
+  }
+
   // Flinger range outlines for the signed-in player's own bases.
   // Range rules come from BUILDING5.getFlingerRange; iteration mirrors
   // MapRoomPopup.GetCellsInRange (odd-q offset -> axial -> cube ring).
-  drawOwnedRangeOverlays(width, height) {
-    const sources = [];
-    for (const cell of this.cellCache.values()) {
-      if (Number(cell.mine || 0) !== 1) {
-        continue;
-      }
-
-      const range = getFlingerRange(cell.f, Number(cell.b) === MR2.yardTypes.main);
-      if (range <= 0 || !this.doesContainDisplayableBase(cell)) {
-        continue;
-      }
-
-      sources.push({ x: cell.x, y: cell.y, range });
+  /**
+   * ApplyRangeHighlighting - which cells fall inside a flinger's reach.
+   *
+   * Ported verbatim: odd-q offset in, axial for the distance metric, odd-q
+   * back out. `(x - (x & 1)) / 2` is the odd-q shove; distance is the cube
+   * metric max(|q|, |r|, |s|) with s = -q - r.
+   *
+   * Two rules that are easy to miss and both matter:
+   *   - the origin is skipped (`deltaQ == 0 && deltaR == 0` continues), and
+   *   - water NEVER highlights (`if (cell && !cell._water)`).
+   *
+   * The 0.35 band exists only with the ALLIANCE_DECLAREWAR powerup, which
+   * makes baseRange = range - 2. Without it every enumerated cell satisfies
+   * distance <= baseRange, so the whole area is a uniform 0.5 - that is the
+   * case here, since this viewer has no powerup state.
+   */
+  /**
+   * Cached wrapper around computeRangeHighlight().
+   *
+   * The set only changes when the cell cache changes - a new zone arriving,
+   * an own base appearing, a flinger level updating - or when the hidden
+   * player list changes. It was being recomputed on every frame, walking the
+   * WHOLE cache each time: 17ms per frame on a fully scanned world, for a
+   * result that is identical until something merges.
+   */
+  rangeHighlight() {
+    if (this.rangeHighlightVersion !== this.cacheVersion) {
+      this.rangeHighlightKeys = this.computeRangeHighlight();
+      this.rangeHighlightVersion = this.cacheVersion;
     }
+    return this.rangeHighlightKeys;
+  }
 
-    if (!sources.length) {
-      return;
-    }
+  computeRangeHighlight() {
+    return this.computeFlingerReach((cell) => Number(cell.mine || 0) === 1);
+  }
 
+  // The flinger-range filter's anchor set: every yard owned by the chosen
+  // relation groups (me / allies / enemies / other), radiating through the
+  // same verbatim GetCellsInRange port as the own-range rings, so the
+  // filter and the drawn rings can never disagree.
+  computeFlingerReachFor(groups, relSets) {
+    const wanted = new Set(groups || []);
+    return this.computeFlingerReach((cell) => {
+      const isMain = Number(cell.b) === MR2.yardTypes.main;
+      if (!isMain && Number(cell.b) !== MR2.yardTypes.outpost) {
+        return false;
+      }
+      let rel = "other";
+      if (Number(cell.mine || 0) === 1) {
+        rel = "me";
+      } else {
+        const owner = String(cell.n || "").trim().toLocaleLowerCase();
+        if (relSets?.own?.has(owner)) rel = "me";
+        else if (relSets?.enemies?.has(owner)) rel = "enemies";
+        else if (relSets?.allies?.has(owner)) rel = "allies";
+      }
+      return wanted.has(rel);
+    });
+  }
+
+  computeFlingerReach(anchorPredicate) {
+    const keys = new Set();
     const mapWidth = this.getMapWidth();
     const mapHeight = this.getMapHeight();
-    const marginX = MR2.cellWidth * 2;
-    const marginY = MR2.cellHeight * 2;
-    const minWorldX = this.offsetX - marginX;
-    const maxWorldX = this.offsetX + width / this.zoom + marginX;
-    const minWorldY = this.offsetY - marginY;
-    const maxWorldY = this.offsetY + height / this.zoom + marginY;
-    const rangeCells = new Map();
 
-    for (const source of sources) {
-      const [startQ, startR] = offsetToCube(source.x, source.y);
+    for (const cell of this.cellCache.values()) {
+      if (!anchorPredicate(cell) || !this.doesContainDisplayableBase(cell)) {
+        continue;
+      }
+      const isMain = Number(cell.b) === MR2.yardTypes.main;
+      const range = getFlingerRange(cell.f, isMain);
+      if (range <= 0) {
+        continue;
+      }
 
-      for (let deltaQ = -source.range; deltaQ <= source.range; deltaQ += 1) {
-        const minDeltaR = Math.max(-source.range, -deltaQ - source.range);
-        const maxDeltaR = Math.min(source.range, -deltaQ + source.range);
+      // Optimistic home highlighting marks the home cell itself before it
+      // radiates; the radiate loop below then skips its own origin.
+      if (isMain) {
+        keys.add(cellKey(Number(cell.x), Number(cell.y)));
+      }
+
+      const startX = Number(cell.x);
+      const startY = Number(cell.y);
+      const startAxialQ = startX;
+      const startAxialR = startY - (startX - (startX & 1)) / 2;
+
+      for (let deltaQ = -range; deltaQ <= range; deltaQ += 1) {
+        const minDeltaR = Math.max(-range, -deltaQ - range);
+        const maxDeltaR = Math.min(range, -deltaQ + range);
         for (let deltaR = minDeltaR; deltaR <= maxDeltaR; deltaR += 1) {
-          const offset = cubeToOffset(startQ + deltaQ, startR + deltaR);
-          const cellX = positiveModulo(offset.x, mapWidth);
-          const cellY = positiveModulo(offset.y, mapHeight);
-
-          const cached = this.cellCache.get(cellKey(cellX, cellY));
-          if (cached && Number(cached.i || 0) <= MR2.waterMaxHeight && Number(cached.b || 0) <= 0) {
+          if (deltaQ === 0 && deltaR === 0) {
             continue;
           }
-
-          // A range region can straddle the wrap seam, so consider every wrap
-          // copy of the cell and keep those intersecting the viewport. Cells
-          // adjacent across the seam land at adjacent unwrapped positions, so
-          // shared edges still cancel and the outline stays continuous.
-          const base = this.cellToWorld(cellX, cellY);
-          for (const shiftX of [-this.getWorldPeriodX(), 0, this.getWorldPeriodX()]) {
-            for (const shiftY of [-this.getWorldPeriodY(), 0, this.getWorldPeriodY()]) {
-              const worldX = base.x + shiftX;
-              const worldY = base.y + shiftY;
-              if (
-                worldX > maxWorldX ||
-                worldX + MR2.cellWidth < minWorldX ||
-                worldY > maxWorldY ||
-                worldY + MR2.cellHeight < minWorldY
-              ) {
-                continue;
-              }
-
-              rangeCells.set(`${cellX},${cellY},${shiftX},${shiftY}`, { worldX, worldY });
-            }
+          const currentX = startAxialQ + deltaQ;
+          const currentY = (startAxialR + deltaR) + (currentX - (currentX & 1)) / 2;
+          const wrappedX = positiveModulo(currentX, mapWidth);
+          const wrappedY = positiveModulo(currentY, mapHeight);
+          const target = this.cellCache.get(cellKey(wrappedX, wrappedY));
+          // GetCell returns only instantiated cells, and water is excluded.
+          if (!target || Number(this.terrainHeightFor(target)) < 100) {
+            continue;
           }
+          keys.add(cellKey(wrappedX, wrappedY));
         }
       }
     }
 
-    if (!rangeCells.size) {
-      return;
-    }
-
-    const boundaryEdges = new Map();
-    for (const entry of rangeCells.values()) {
-      this.recordHexBoundaryEdges(entry.worldX, entry.worldY, CELL_HEX_VERTICES, CELL_HEX_EDGES, boundaryEdges);
-    }
-
-    const rawLoops = this.buildBoundaryLoops([...boundaryEdges.values()].filter((edge) => edge.count === 1))
-      .map((loop) => this.simplifyBoundaryLoop(loop))
-      .filter((loop) => loop.length >= 3);
-    if (!rawLoops.length) {
-      return;
-    }
-
-    this.ctx.save();
-    this.ctx.fillStyle = "rgba(102, 178, 255, 0.18)";
-    this.traceBoundaryLoops(rawLoops);
-    this.ctx.fill("evenodd");
-    this.ctx.restore();
-
-    this.ctx.save();
-    this.ctx.strokeStyle = "rgba(176, 236, 255, 0.72)";
-    this.ctx.lineWidth = clamp(3 * this.zoom, 1.8, 3.8);
-    this.ctx.lineJoin = "round";
-    this.ctx.lineCap = "round";
-    this.ctx.shadowColor = "rgba(156, 220, 255, 0.26)";
-    this.ctx.shadowBlur = clamp(3 * this.zoom, 2, 4);
-    this.traceBoundaryLoops(rawLoops);
-    this.ctx.stroke();
-    this.ctx.restore();
+    return keys;
   }
 
-  drawCellContents({ cell, cellX, cellY }) {
+  /**
+   * mcGlow, drawn between terrain and cell contents - it is depth 3 inside
+   * `mc`, above the terrain shape but below mcPlayer at depth 22.
+   */
+  drawGlowPass(entries) {
+    // Only for the flat-fill fallback path: when the painted tiles are up,
+    // drawTerrainTiles interleaves the glow per cell instead. Nothing glows
+    // in the simplified view.
+    if (this.terrainTilesDrawn || this.zoom < LOD_SIMPLE_ZOOM) {
+      return;
+    }
+    for (const entry of entries) {
+      const state = this.getGlowState(entry.cell);
+      if (!state) {
+        continue;
+      }
+      const world = this.cellToWorld(entry.cellX, entry.cellY);
+      this.drawGlow(
+        state,
+        (world.x - this.offsetX) * this.zoom,
+        (world.y - this.offsetY + this.liftFor(entry.cell)) * this.zoom,
+      );
+    }
+  }
+
+  drawCellContents({ cell: rawCell, cellX, cellY }) {
+    // A hidden base draws as the wild monster cell it masquerades as, so the
+    // marker, tribe art, level and name all come from one substituted cell.
+    const cell = this.displayCell(rawCell);
     const world = this.cellToWorld(cellX, cellY);
     const screenX = (world.x - this.offsetX) * this.zoom;
-    const screenY = (world.y - this.offsetY) * this.zoom;
+    // Cell contents ride the terrain: mcPlayer and everything anchored to it
+    // are children of the same `mc` that MapRoomCell.Update lifts, so a base
+    // on high ground sits with its ground, not floating above it.
+    const simplified = this.zoom < LOD_SIMPLE_ZOOM;
+    // liftFor is already zero in the simplified view, so markers land on the
+    // same uniform rows as the ground beneath them.
+    const screenY = (world.y - this.offsetY + this.liftFor(rawCell)) * this.zoom;
 
     if (!this.shouldDisplayBaseCell(cell)) {
       return;
     }
 
-    if (this.zoom < LOD_SIMPLE_ZOOM) {
+    if (simplified) {
       this.drawSimpleBaseMarker(cell, screenX, screenY);
       return;
     }
 
-    if (Number(cell.b) === MR2.yardTypes.main) {
-      this.drawMainOutline(screenX, screenY);
-    }
 
     const highlightStyle = this.getHighlightStyle(cell);
     if (highlightStyle) {
       this.drawHighlight(highlightStyle, screenX, screenY);
     }
 
-    const playerHighlight = this.getPlayerHighlightColor(cell);
-    if (playerHighlight) {
-      this.drawPlayerHighlight(cell, playerHighlight, screenX, screenY);
-    } else {
-      this.drawOwnershipOverlay(cell, screenX, screenY);
-    }
+    // No hex outlines or tinted overlays on owned bases any more: the
+    // relationship is carried by the name bar's own colour instead, which is
+    // where the client puts it (SetupAlliance's frame labels).
 
     const iconPaths = this.getIconPathsForCell(cell);
     if (iconPaths) {
@@ -2977,45 +4098,99 @@ export class MapRenderer {
       }
     }
 
-    if (Number(cell.p || 0) === 1) {
+    // The bubble is depth 2 inside mcPlayer, above the base artwork. Wild
+    // monster cells have no protected frame, so they keep the flat badge.
+    if (Number(cell.p || 0) === 1 && Number(cell.b) === MR2.yardTypes.wildMonster) {
       this.drawCenteredIcon(ASSET_PATHS.damageProtection, screenX, screenY);
+    } else {
+      this.drawProtectionBubble(cell, screenX, screenY);
     }
 
-    if (Number(cell.dm || 0) > 0) {
-      this.drawDamageBar(cell, screenX, screenY);
-    }
+    // mcFlag is depth 7 and mcLevel depth 28, both ABOVE the base artwork at
+    // depth 1 - which is the draw order corrected during the research.
+    this.drawNameBar(cell, screenX, screenY);
+    this.drawLevelStar(cell, screenX, screenY);
 
-    const isMainYard = Number(cell.b) === MR2.yardTypes.main;
+    // Names are drawn on the bar by drawNameBar, exactly as mcFlag.txt does.
+    // The floating white label under the cell was this viewer's own invention
+    // and duplicated it, so it is gone.
 
-    if (isMainYard) {
-      // Main yard names stay visible at every zoom level and are drawn on
-      // top of everything after the cell pass completes.
-      this.pendingMainLabels.push({
-        cell,
-        screenX,
-        screenY,
-        stroke: this.getMainLabelStrokeColor(cell),
-      });
-    } else if (this.zoom >= LABEL_RENDER_ZOOM_MIN) {
-      this.drawLabel(cell, screenX, screenY);
-    }
-
-    if (this.showLoot && this.zoom >= LABEL_RENDER_ZOOM_MIN) {
+    // Loot pills are main-yards-only: outposts stay quiet even with the
+    // map overlay on.
+    if (this.showLoot && this.zoom >= LABEL_RENDER_ZOOM_MIN
+      && Number(cell.b) === MR2.yardTypes.main) {
       this.drawLootLabel(cell, screenX, screenY);
     }
+    if (this.showOutpostTypes && this.zoom >= LABEL_RENDER_ZOOM_MIN
+      && Number(cell.b) === MR2.yardTypes.outpost) {
+      this.drawOutpostTypeLabel(cell, screenX, screenY);
+    }
+    this.drawIdleWorker(cell, screenX, screenY);
+  }
+
+  // The game's idle-worker figure (mcWorker) on OWN outposts with no
+  // housing job running - shown exactly per MapRoomCell.as:
+  // !workerBusy && base == 3 && mine, where busy means the housing
+  // finishtime is still in the future. Position replicates the SWF's
+  // placement chain: mcPlayer at (61.5, 41) + mcWorker at (47.25,
+  // -24.75) = (108.75, 16.25) from the cell origin, art 27x27.
+  drawIdleWorker(cell, screenX, screenY) {
+    if (!this.showIdleWorkers) return;
+    if (Number(cell.b) !== MR2.yardTypes.outpost || Number(cell.mine || 0) !== 1) return;
+    const finishAt = Number(cell.mft || 0);
+    if (finishAt > Date.now() / 1000) return;          // worker busy
+    const image = this.assets.get(MAPROOM_UI.workerIdle);
+    if (!image) return;
+    this.ctx.drawImage(
+      image,
+      screenX + 108.75 * this.zoom,
+      screenY + 16.25 * this.zoom,
+      27 * this.zoom,
+      27 * this.zoom,
+    );
+  }
+
+  // Kit-tier text over the owner name on outposts, sharing the raised
+  // loot-pill spot. Colours per tier; Ultra is black with a purple
+  // outline so it reads on any terrain.
+  drawOutpostTypeLabel(cell, screenX, screenY) {
+    const key = getOutpostKitKey(Number(cell.v || 0));
+    // Ultra carries an extra white halo outside the black outline, at half
+    // the black ring's visible thickness, so it pops on any terrain.
+    const styles = {
+      none: { label: "NO KIT", fill: "#ff4a3d", stroke: "rgba(0,0,0,0.85)" },
+      regular: { label: "REGULAR", fill: "#7fd4ff", stroke: "rgba(0,0,0,0.85)" },
+      mega: { label: "MEGA", fill: "#ffd700", stroke: "rgba(0,0,0,0.85)" },
+      ultra: { label: "ULTRA", fill: "#8a2be2", stroke: "#ffffff", halo: "rgba(0,0,0,0.85)" },
+    };
+    const style = styles[key] || styles.none;
+    // Same color per family; the subtier only extends the text ("MEGA++").
+    const label = style.label + getOutpostKitSuffix(Number(cell.v || 0));
+    const fontSize = Math.max(9, Math.round(13 * this.zoom));
+    const centerX = screenX + (MR2.cellWidth * this.zoom) / 2;
+    // Same below-the-name-bar spot as the loot pill.
+    const textY = screenY + 61 * this.zoom;
+    this.ctx.save();
+    this.ctx.font = `700 ${fontSize}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
+    this.ctx.textAlign = "center";
+    this.ctx.textBaseline = "middle";
+    if (style.halo) {
+      // Outer stroke draws first. 4.5 over an inner 1.5 leaves the outer
+      // ring twice as thick as the inner one.
+      this.ctx.lineWidth = 4.5;
+      this.ctx.strokeStyle = style.halo;
+      this.ctx.strokeText(label, centerX, textY);
+    }
+    this.ctx.lineWidth = style.halo ? 1.5 : 3;
+    this.ctx.strokeStyle = style.stroke;
+    this.ctx.strokeText(label, centerX, textY);
+    this.ctx.fillStyle = style.fill;
+    this.ctx.fillText(label, centerX, textY);
+    this.ctx.restore();
   }
 
   // Purple halo drawn around every main yard, underneath any group
   // highlight stroke so both remain visible.
-  drawMainOutline(screenX, screenY) {
-    this.ctx.save();
-    this.ctx.strokeStyle = MAIN_OUTLINE_COLOR;
-    this.ctx.lineWidth = Math.max(4, 6.5 * this.zoom);
-    this.ctx.lineJoin = "round";
-    this.traceHexPath(screenX, screenY, CELL_HEX_VERTICES);
-    this.ctx.stroke();
-    this.ctx.restore();
-  }
 
   // Far-zoom base marker: a small colored square that keeps ownership and
   // group information readable when icons would be sub-pixel noise.
@@ -3047,18 +4222,23 @@ export class MapRenderer {
       color = "#f0a35e";
     }
 
-    const size = Math.max(2.5, MR2.cellWidth * this.zoom * 0.42);
+    // Main yards are the thing worth finding at far zoom, so they keep a
+    // floor of 3px while outposts may shrink away. The new zoom range reaches
+    // 0.038, where 0.42 of a cell is well under a pixel.
+    const scaled = MR2.cellWidth * this.zoom * 0.42;
+    const size = isMainYard ? Math.max(3, scaled) : Math.max(2, scaled);
     const markerX = screenX + (MR2.cellWidth * this.zoom - size) / 2;
     const markerY = screenY + (MR2.cellHeight * this.zoom - size) / 2;
 
-    if (isMainYard) {
-      this.ctx.strokeStyle = MAIN_OUTLINE_COLOR;
-      this.ctx.lineWidth = 2;
-      this.ctx.strokeRect(markerX - 2, markerY - 2, size + 4, size + 4);
-    }
-
+    // A main yard reads as the larger marker with a dark keyline; the purple
+    // halo is gone along with the rest of the purple scheme.
     this.ctx.fillStyle = color;
     this.ctx.fillRect(markerX, markerY, size, size);
+    if (isMainYard) {
+      this.ctx.strokeStyle = "rgba(0, 0, 0, 0.65)";
+      this.ctx.lineWidth = 1;
+      this.ctx.strokeRect(markerX + 0.5, markerY + 0.5, size - 1, size - 1);
+    }
 
     // Main yard names stay visible even in far-zoom simplified mode; they
     // are collected and drawn on top of all markers.
@@ -3072,22 +4252,93 @@ export class MapRenderer {
     }
   }
 
+  // Sorted loot totals across every cached cell that shows a loot pill.
+  // Rebuilt lazily when the cache grows or after 60s, so refreshed zones
+  // fold in without resorting on every frame. Same coverage caveat as the
+  // kit tallies: it only knows cells this viewer has cached.
+  getLootDistribution() {
+    const now = Date.now();
+    const cached = this.lootDistribution;
+    if (cached && cached.cellCount === this.cellCache.size && now - cached.builtAt < 60_000) {
+      return cached.values;
+    }
+    const values = [];
+    for (const cell of this.cellCache.values()) {
+      const loot = getCellLootTotal(cell);
+      if (loot > 0) {
+        values.push(loot);
+      }
+    }
+    values.sort((a, b) => a - b);
+    this.lootDistribution = { values, builtAt: now, cellCount: this.cellCache.size };
+    return values;
+  }
+
+  // "Top 1%" / "Bottom 10%" style label for a cell's total loot, against the
+  // whole cached population. The ladder mirrors at the median: at or above
+  // it reads Top, below it reads Bottom, each snapped to the smallest band
+  // that contains the cell.
+  getLootTierLabel(loot) {
+    const values = this.getLootDistribution();
+    const n = values.length;
+    if (!n) {
+      return null;
+    }
+    // Binary searches for the tie-safe counts on each side.
+    let lo = 0, hi = n;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (values[mid] < loot) lo = mid + 1; else hi = mid; }
+    const strictlyBelow = lo;
+    hi = n;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (values[mid] <= loot) lo = mid + 1; else hi = mid; }
+    const atOrBelow = lo;
+    const BANDS = [0.1, 1, 5, 10, 25, 50];
+    // At or above the median reads Top; ties straddling it snap to Top 50%.
+    if (atOrBelow / n >= 0.5) {
+      const topShare = ((n - strictlyBelow) / n) * 100;
+      const band = BANDS.find((b) => topShare <= b) ?? 50;
+      return `Top ${band}%`;
+    }
+    const bottomShare = (atOrBelow / n) * 100;
+    const band = BANDS.find((b) => bottomShare <= b) ?? 50;
+    return `Bottom ${band}%`;
+  }
+
   drawLootLabel(cell, screenX, screenY) {
     const style = LOOT_RESOURCE_STYLES[this.lootResource] || LOOT_RESOURCE_STYLES.total;
-    const loot = this.lootResource === "total"
+    const tierMode = this.lootResource === "tier";
+    const loot = (tierMode || this.lootResource === "total")
       ? getCellLootTotal(cell)
       : (Number(cell?.r?.[this.lootResource]) || 0);
     if (loot <= 0) {
       return;
     }
 
-    const text = formatCompactNumber(loot);
+    let text;
+    let pillColor = style.color;
+    if (tierMode) {
+      text = this.getLootTierLabel(loot);
+      if (!text) {
+        return;
+      }
+      // Bright gold for the truly rich, muted for the bottom half, so the
+      // tiers scan at a glance without reading every pill.
+      if (text === "Top 0.1%" || text === "Top 1%") {
+        pillColor = "#ffd700";
+      } else if (text.startsWith("Bottom")) {
+        pillColor = "#c9c9c9";
+      }
+    } else {
+      text = formatCompactNumber(loot);
+    }
     const fontSize = Math.max(9, Math.round(13 * this.zoom));
     // Centred on the yard/outpost rather than hanging below it: the pill is
     // about that cell, and below the tile it collided with the owner label
     // and read as belonging to whatever sat underneath.
     const centerX = screenX + (MR2.cellWidth * this.zoom) / 2;
-    const textY = screenY + (MR2.cellHeight * this.zoom) / 2;
+    // Just below the name/health bar (plate bottom sits at 53 world px
+    // from the cell origin); world units scaled by zoom keep the spot
+    // fixed on the cell at any zoom.
+    const textY = screenY + 61 * this.zoom;
 
     this.ctx.save();
     this.ctx.font = `700 ${fontSize}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
@@ -3099,73 +4350,23 @@ export class MapRenderer {
     this.ctx.beginPath();
     this.ctx.roundRect(centerX - width / 2, textY - fontSize * 0.72, width, fontSize * 1.44, 4);
     this.ctx.fill();
-    this.ctx.fillStyle = style.color;
+    this.ctx.fillStyle = pillColor;
     this.ctx.fillText(text, centerX, textY);
     this.ctx.restore();
   }
 
-  drawPlayerHighlight(cell, role, screenX, screenY) {
-    const isEnemy = role === "enemy";
-    const isOutpost = Number(cell.b) === MR2.yardTypes.outpost;
-    const overlayPath = isEnemy ? ASSET_PATHS.overlayRed : ASSET_PATHS.overlayBlue;
-    const image = this.assets.get(overlayPath);
-    if (image) {
-      this.ctx.drawImage(image, screenX, screenY, MR2.cellWidth * this.zoom, MR2.cellHeight * this.zoom);
-    }
 
-    const stroke = isEnemy ? (isOutpost ? ENEMY_OUTPOST_STROKE : ENEMY_STROKE) : ALLY_STROKE;
-    const fill = isEnemy ? (isOutpost ? ENEMY_OUTPOST_FILL : ENEMY_FILL) : ALLY_FILL;
-    this.ctx.save();
-    this.ctx.fillStyle = fill;
-    this.ctx.strokeStyle = stroke;
-    this.ctx.lineWidth = Math.max(2, 3 * this.zoom);
-    this.ctx.lineJoin = "round";
-    this.traceHexPath(screenX, screenY, CELL_HEX_VERTICES);
-    this.ctx.fill();
-    this.ctx.stroke();
-    this.ctx.restore();
-  }
-
-  drawOwnershipOverlay(cell, screenX, screenY) {
-    let overlayPath = null;
-    if (Number(cell.mine || 0) === 1) {
-      overlayPath = ASSET_PATHS.overlayBlue;
-    } else if (Number(cell.t || 0) > Math.floor(Date.now() / 1000)) {
-      // Active truce with this player.
-      overlayPath = ASSET_PATHS.overlayGreen;
-    } else if (Number(cell.d || 0) === 1) {
-      overlayPath = ASSET_PATHS.overlayRed;
-    } else if (Number(cell.b) === MR2.yardTypes.outpost) {
-      // Default (neutral) player outposts are marked yellow.
-      overlayPath = ASSET_PATHS.overlayYellow;
-    }
-
-    if (!overlayPath) {
-      return;
-    }
-
-    const image = this.assets.get(overlayPath);
-    if (!image) {
-      return;
-    }
-
-    this.ctx.drawImage(
-      image,
-      screenX,
-      screenY,
-      MR2.cellWidth * this.zoom,
-      MR2.cellHeight * this.zoom,
-    );
-  }
 
   // Draws base art centered on the cell, scaled down (never up) to fit the
   // hex footprint while preserving aspect ratio; tall art may overhang the
   // top like in the original game.
   drawCellArt(paths, screenX, screenY) {
     let image = null;
+    let matched = null;
     for (const path of paths) {
       image = this.assets.get(path);
       if (image) {
+        matched = path;
         break;
       }
     }
@@ -3173,14 +4374,30 @@ export class MapRenderer {
       return;
     }
 
-    const maxWidth = MR2.cellWidth;
-    const maxHeight = 112;
-    const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
-    const width = image.width * scale;
-    const height = image.height * scale;
-    const drawX = screenX + (MR2.cellWidth - width) * 0.5 * this.zoom;
-    const drawY = screenY + (MR2.cellHeight - height) * 0.5 * this.zoom;
-    this.ctx.drawImage(image, drawX, drawY, width * this.zoom, height * this.zoom);
+    // Anchored at mcPlayer, at the frame's own bounds - not scaled to fit the
+    // cell and centred in it, which is what this used to do and why the art
+    // sat low and small in its diamond.
+    const bounds = CELL_ART_BOUNDS[CELL_ART_PLACEMENT[matched]] || null;
+    if (!bounds) {
+      // Unknown art: fall back to natural size on the anchor.
+      this.ctx.drawImage(
+        image,
+        screenX + MC_PLAYER_ANCHOR.x * this.zoom,
+        screenY + MC_PLAYER_ANCHOR.y * this.zoom,
+        image.width * this.zoom, image.height * this.zoom,
+      );
+      return;
+    }
+    // A PNG wider than its bounds has a stroke baked in that grew it evenly.
+    const bleedX = (image.width - bounds.width) / 2;
+    const bleedY = (image.height - bounds.height) / 2;
+    this.ctx.drawImage(
+      image,
+      screenX + (MC_PLAYER_ANCHOR.x + bounds.x - bleedX) * this.zoom,
+      screenY + (MC_PLAYER_ANCHOR.y + bounds.y - bleedY) * this.zoom,
+      image.width * this.zoom,
+      image.height * this.zoom,
+    );
   }
 
   drawCenteredIcon(path, screenX, screenY) {
@@ -3194,30 +4411,193 @@ export class MapRenderer {
     this.ctx.drawImage(image, drawX, drawY, image.width * this.zoom, image.height * this.zoom);
   }
 
-  drawDamageBar(cell, screenX, screenY) {
-    const sprite = this.assets.get(ASSET_PATHS.damageBar);
-    if (!sprite) {
+  /**
+   * mcPlayer.mcFlag.nameBar - the name/health bar.
+   *
+   * Geometry is the SWF's: a 101x26 mcBG plate with mcBar over it, the whole
+   * nameBar at (-34, -4) from mcPlayer scaled 0.95013 x 0.64. Update() sets
+   * `mcBar.width = Math.max(0, 100 - _damage)` in nameBar space, so the fill
+   * is a straight percentage of 100 units, NOT of the plate's own width.
+   *
+   * The bar is drawn for every base, not only damaged ones: the undamaged
+   * branch of Update() is `mcBar.width = 100`, a full bar, which is what
+   * carries the alliance colour.
+   *
+   * Colour comes from SetupAlliance()'s label: wmyard for wild tribes, player
+   * for your own, none otherwise (this viewer has no alliance relationships to
+   * resolve). The destroyed swap is deliberately inside `if (_base == 1)` in
+   * the client, so player yards and outposts keep their normal colour when
+   * destroyed - only wild tribes repaint.
+   */
+  drawNameBar(cell, screenX, screenY) {
+    const base = Number(cell.b || 0);
+    if (base <= 0) {
+      return;
+    }
+    // Clamped for display only: anything above the ceiling renders as the
+    // ceiling, so a heavily damaged base still shows a readable sliver.
+    const damage = clamp(Number(cell.dm || 0), 0, NAME_BAR_MAX_DISPLAY_DAMAGE);
+    const destroyed = Number(cell.d || 0) === 1;
+
+    // SetupAlliance's frame labels. The ally and hostile frames exist in the
+    // SWF but the client only reaches them from real alliance relationships;
+    // here they are driven by this viewer's own ally/enemy lists, which is
+    // what the removed hex outlines used to convey.
+    let label = "none";
+    if (base === MR2.yardTypes.wildMonster) {
+      label = destroyed ? "destroyed" : "wmyard";
+    } else if (Number(cell.mine || 0) === 1) {
+      label = "player";
+    } else {
+      const role = this.getPlayerHighlightColor(cell);
+      if (role === "ally") {
+        label = "ally";
+      } else if (role === "enemy") {
+        label = "hostile";
+      }
+    }
+    const colours = NAME_BAR_COLOURS[label] || NAME_BAR_COLOURS.none;
+
+    const originX = screenX + (MC_PLAYER_ANCHOR.x + NAME_BAR.offsetX) * this.zoom;
+    const originY = screenY + (MC_PLAYER_ANCHOR.y + NAME_BAR.offsetY) * this.zoom;
+    const scaleX = NAME_BAR.scaleX * this.zoom;
+    const scaleY = NAME_BAR.scaleY * this.zoom;
+
+    // Every label's plate is the same box - 100 x 25 at the nameBar origin.
+    // `none` and `wmyard` reach it through a scaled generic rectangle whose
+    // translation and bounds cancel out; see NAME_BAR in shared.js.
+    this.ctx.save();
+    // Where the authored plate and fill are indistinguishable, the exposed
+    // part is darkened so the depletion actually reads. See
+    // NAME_BAR_EMPTY_DARKEN - the one deviation from the client here.
+    this.ctx.fillStyle = colourDistance(colours.bg, colours.bar) < NAME_BAR_CONTRAST_THRESHOLD
+      ? darkenHex(colours.bg, NAME_BAR_EMPTY_DARKEN)
+      : colours.bg;
+    this.ctx.fillRect(
+      originX + NAME_BAR.bgX * scaleX, originY + NAME_BAR.bgY * scaleY,
+      NAME_BAR.bgWidth * scaleX, NAME_BAR.bgHeight * scaleY,
+    );
+
+    // mcBar.width = max(0, 100 - dm), in nameBar space: a straight percentage
+    // of 100 units, not of the plate's own width.
+    const filled = Math.max(0, NAME_BAR.barFullWidth - damage);
+    if (filled > 0) {
+      this.ctx.fillStyle = colours.bar;
+      this.ctx.fillRect(
+        originX, originY + NAME_BAR.barY * scaleY,
+        filled * scaleX, NAME_BAR.barHeight * scaleY,
+      );
+    }
+    // The plate's outline. The #120 shape is a soft stroke that peaks at
+    // alpha 95, and scaled down to the bar's 0.64 vertical it washed out to
+    // grey; in game the border reads as solid black, so it is drawn as a
+    // crisp 1px stroke instead of the bitmap.
+    this.ctx.strokeStyle = NAME_BAR_OUTLINE;
+    this.ctx.lineWidth = Math.max(1, this.zoom);
+    this.ctx.strokeRect(
+      originX + 0.5, originY + 0.5,
+      NAME_BAR.bgWidth * scaleX - 1, NAME_BAR.bgHeight * scaleY - 1,
+    );
+    this.ctx.restore();
+
+    // mcFlag.txt sits on the bar, centred, 8px Verdana Bold in black.
+    const name = String(cell.n || "").trim();
+    if (name) {
+      this.ctx.save();
+      this.ctx.font = `bold ${NAME_TEXT.fontSize * this.zoom}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
+      this.ctx.fillStyle = NAME_TEXT.colour;
+      this.ctx.textAlign = "center";
+      this.ctx.textBaseline = "middle";
+      this.ctx.fillText(
+        name,
+        screenX + (MC_PLAYER_ANCHOR.x + NAME_TEXT.centreX) * this.zoom,
+        screenY + (MC_PLAYER_ANCHOR.y + NAME_TEXT.centreY) * this.zoom,
+      );
+      this.ctx.restore();
+    }
+  }
+
+  /**
+   * mcPlayer.mcLevel - the level star.
+   *
+   * Frame 1 (grey #B9B9B9 star, #333333 text) for wild tribes, frame 2 (gold
+   * #D3A000, #80500A text) for players. Update() asserts
+   * `mcLevel.visible = false` and re-enables it only when `_level > 0`.
+   */
+  drawLevelStar(cell, screenX, screenY) {
+    const level = Number(cell.l || 0);
+    if (level <= 0) {
+      return;
+    }
+    const wild = Number(cell.b) === MR2.yardTypes.wildMonster;
+    const style = wild ? LEVEL_PLACEMENT.wild : LEVEL_PLACEMENT.player;
+    const star = this.assets.get(MAPROOM_UI[style.star]);
+    if (!star) {
       return;
     }
 
-    const damage = clamp(Number(cell.dm || 0) / 100, 0, 0.99);
-    const segmentHeight = 4;
-    const segmentCount = Math.floor(sprite.height / segmentHeight);
-    const segmentIndex = Math.min(Math.floor(segmentCount * damage), segmentCount - 1);
-    const sourceY = segmentIndex * segmentHeight;
-    const drawX = screenX + (MR2.cellWidth - sprite.width) * 0.5 * this.zoom;
-    const drawY = screenY + (MR2.cellHeight - segmentHeight) * 0.5 * this.zoom;
-
+    const centreX = screenX + LEVEL_PLACEMENT.x * this.zoom;
+    const centreY = screenY + LEVEL_PLACEMENT.y * this.zoom;
     this.ctx.drawImage(
-      sprite,
-      0,
-      sourceY,
-      sprite.width,
-      segmentHeight,
-      drawX,
-      drawY,
-      sprite.width * this.zoom,
-      segmentHeight * this.zoom,
+      star,
+      centreX + LEVEL_PLACEMENT.starOffsetX * this.zoom,
+      centreY + LEVEL_PLACEMENT.starOffsetY * this.zoom,
+      LEVEL_PLACEMENT.starWidth * this.zoom,
+      LEVEL_PLACEMENT.starHeight * this.zoom,
+    );
+
+    this.ctx.save();
+    this.ctx.font = `bold ${LEVEL_PLACEMENT.fontSize * this.zoom}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
+    this.ctx.fillStyle = style.text;
+    this.ctx.textAlign = "center";
+    this.ctx.textBaseline = "middle";
+    if ("letterSpacing" in this.ctx) {
+      this.ctx.letterSpacing = `${LEVEL_PLACEMENT.letterSpacing * this.zoom}px`;
+    }
+    this.ctx.fillText(
+      String(level),
+      centreX + LEVEL_PLACEMENT.textOffsetX * this.zoom,
+      centreY + LEVEL_PLACEMENT.textOffsetY * this.zoom,
+    );
+    this.ctx.restore();
+  }
+
+  /**
+   * The damage-protection bubble (#151 wrapping shape #150).
+   *
+   * Authored once at 80x64 and stretched per footprint - it is BIGGER than the
+   * base artwork it covers (95.7x78.5 over an 87x76 main yard), which is why
+   * it cannot be baked into the -protected cell frames and has to be drawn
+   * separately. That omission is why no bubble appeared at all.
+   */
+  drawProtectionBubble(cell, screenX, screenY) {
+    if (Number(cell.p || 0) !== 1) {
+      return;
+    }
+    const base = Number(cell.b);
+    const placement = base === MR2.yardTypes.main
+      ? PROTECTION_PLACEMENT.main
+      : (base === MR2.yardTypes.outpost ? PROTECTION_PLACEMENT.outpost : null);
+    if (!placement) {
+      return;
+    }
+    const bubble = this.assets.get(MAPROOM_UI.protection);
+    if (!bubble) {
+      return;
+    }
+    // The shape's bounds offset lives INSIDE #151's scaled space, so it is
+    // added before the stretch. The export carries the usual half-pixel bleed
+    // on each side, which is backed out the same way as the cell art.
+    const bleedX = (bubble.width - PROTECTION_BOUNDS.width) / 2;
+    const bleedY = (bubble.height - PROTECTION_BOUNDS.height) / 2;
+    this.ctx.drawImage(
+      bubble,
+      screenX + (MC_PLAYER_ANCHOR.x + placement.x
+        + (PROTECTION_BOUNDS.x - bleedX) * placement.scaleX) * this.zoom,
+      screenY + (MC_PLAYER_ANCHOR.y + placement.y
+        + (PROTECTION_BOUNDS.y - bleedY) * placement.scaleY) * this.zoom,
+      bubble.width * placement.scaleX * this.zoom,
+      bubble.height * placement.scaleY * this.zoom,
     );
   }
 
@@ -3227,7 +4607,9 @@ export class MapRenderer {
       return;
     }
 
-    const label = `${name} (${Number(cell.l || 0)})`;
+    // Level lives on mcLevel's star now, exactly as the client draws it, so
+    // the text label is just the name.
+    const label = name;
     this.ctx.save();
     this.ctx.font = `${Math.max(11, 11 * this.zoom)}px Verdana, Geneva, 'DejaVu Sans', Tahoma, sans-serif`;
     this.ctx.textAlign = "center";
@@ -3239,6 +4621,16 @@ export class MapRenderer {
     this.ctx.strokeText(label, labelX, labelY);
     this.ctx.fillText(label, labelX, labelY);
     this.ctx.restore();
+  }
+
+  setShowIdleWorkers(flag) {
+    this.showIdleWorkers = Boolean(flag);
+    this.render();
+  }
+
+  setShowOutpostTypes(flag) {
+    this.showOutpostTypes = Boolean(flag);
+    this.render();
   }
 
   setShowLoot(flag) {
@@ -3255,50 +4647,55 @@ export class MapRenderer {
     this.hiddenPlayerNames = new Set(
       names.map((name) => String(name).trim().toLocaleLowerCase()).filter(Boolean),
     );
+    // Disguises are computed from coordinates now, so there is no memo to
+    // invalidate here - but the range-highlight set depends on which cells
+    // are displayable, so it does have to be rebuilt.
+    this.cacheVersion += 1;
     this.render();
   }
 
-  // True when the cell belongs to a moderation-hidden player.
-  // Display height for terrain: hidden players' cells blend into their
-  // surroundings by averaging the plain-terrain neighbours instead of using
-  // the tile's true (elevated) base height, which would paint a lone grey
-  // mountain hex marking the hidden base. Memoized per cell object; merges
-  // replace the object, which naturally invalidates it.
+  /**
+   * The wild monster cell a hidden base is rendered as.
+   *
+   * This used to copy the NEAREST loaded tribe and blend a fake height from
+   * the neighbours, which had three problems: it memoized a live reference to
+   * another cell object (so a merge left the disguise stale), it needed a
+   * tribe to be loaded before it could disguise anything, and the result was
+   * an approximation that a player who knew the generator could spot.
+   *
+   * MR2 generation makes all of that unnecessary. Tribe and level are pure
+   * functions of (x + y), so the cell that WOULD have generated here can be
+   * computed exactly, offline, with no cache lookups and nothing to memoize.
+   * The height passes through untouched: userCell and wildMonsterCell both
+   * emit the same seeded terrainHeight, so a hidden base already carries the
+   * exact height its wild counterpart would have had. Blending it was what
+   * made these tiles conspicuous in the first place.
+   */
+  hiddenDisguiseFor(cell) {
+    return generatedWildCell(cell.x, cell.y, this.terrainHeightFor(cell));
+  }
+
+  /**
+   * What to draw for this cell. A hidden base returns the wild monster cell
+   * it is masquerading as, so every read - terrain, marker, tribe, level -
+   * comes from one consistent source rather than a half-substituted cell.
+   */
+  displayCell(cell) {
+    if (!cell || !this.isCellHidden(cell)) {
+      return cell;
+    }
+    return { ...this.hiddenDisguiseFor(cell), hiddenDisguised: true };
+  }
+
   terrainHeightFor(cell) {
-    if (!this.isCellHidden(cell)) {
+    if (!this.isCellHidden(cell) || this.hiddenTileStyle !== "water") {
+      // Real terrain height, hidden or not: it is generated from position, so
+      // it is identical to the wild cell's and gives the disguise away to
+      // nobody. Legacy caches may still carry a blendedHeight from the old
+      // scheme; it is deliberately ignored rather than trusted.
       return cell.i;
     }
-    if (this.hiddenTileStyle === "water") {
-      return 60; // water1 band - mirrors the server's HIDDEN_WATER_HEIGHT
-    }
-    if (cell.blendedHeight !== undefined) {
-      return cell.blendedHeight;
-    }
-    let sum = 0;
-    let count = 0;
-    for (let dx = -2; dx <= 2; dx += 1) {
-      for (let dy = -2; dy <= 2; dy += 1) {
-        if (!dx && !dy) {
-          continue;
-        }
-        const neighbor = this.cellCache.get(cellKey(cell.x + dx, cell.y + dy));
-        if (
-          neighbor &&
-          !this.isCellHidden(neighbor) &&
-          Number(neighbor.uid || 0) === 0 &&
-          (neighbor.b === null || neighbor.b === undefined) &&
-          Number(neighbor.i || 0) > 0
-        ) {
-          sum += Number(neighbor.i);
-          count += 1;
-        }
-      }
-    }
-    const blended = count
-      ? Math.round(sum / count)
-      : Math.min(Number(cell.i || 0) || 120, 140);
-    cell.blendedHeight = blended;
-    return blended;
+    return 60; // water1 band - mirrors the server's HIDDEN_WATER_HEIGHT
   }
 
   isCellHidden(cell) {
@@ -3511,23 +4908,70 @@ export class MapRenderer {
     return null;
   }
 
-  getHighlightStyle(cell) {
+  /**
+   * mcGlow's state for this cell.
+   *
+   * MapRoomPopup.Update() resets `mcGlow.alpha = _over ? 0.5 : 0` every
+   * non-dragging pass, then ApplyRangeHighlighting raises in-range cells back
+   * to 0.5. The frame picks the artwork:
+   *
+   *   1 (#68)  idle              - fully transparent, draws nothing
+   *   2 (#69)  hovered           - white
+   *   3 (#69)  in range          - white (frame 3 has no PlaceObject and
+   *                                inherits frame 2's shape)
+   *   4 (#70)  in range + hover  - red
+   *
+   * The bitmaps carry their own alpha (white peaks at 180, red at 255) and
+   * the 0.5 multiplies on top, so an in-range cell lands at ~0.353 effective
+   * white - the grey wash the feature is known by, not a bright outline.
+   */
+  getGlowState(cell) {
+    // The simplified view has neither: a cell is a few pixels across, a wash
+    // over it reads as noise rather than information, and skipping it means
+    // the range set is never even computed at the zoom where walking the
+    // cache costs the most.
+    if (this.zoom < LOD_SIMPLE_ZOOM && !this.forceDetailedExport) {
+      return null;
+    }
     const key = cellKey(cell.x, cell.y);
-    if (key === this.selectedCellKey) {
+    const hovered = key === this.hoveredCellKey;
+    const inRange = this.rangeHighlight().has(key);
+    if (!hovered && !inRange) {
+      return null;
+    }
+    return {
+      asset: hovered && inRange ? MAPROOM_UI.glowRed : MAPROOM_UI.glowWhite,
+      alpha: 0.5,
+    };
+  }
+
+  /** Selection is this viewer's own affordance, not a client state. */
+  getHighlightStyle(cell) {
+    if (cellKey(cell.x, cell.y) === this.selectedCellKey) {
       return {
         fill: "rgba(255, 255, 255, 0.12)",
         stroke: "rgba(255, 255, 255, 0.78)",
       };
     }
-
-    if (key === this.hoveredCellKey) {
-      return {
-        fill: "rgba(255, 255, 255, 0.08)",
-        stroke: "rgba(255, 255, 255, 0.42)",
-      };
-    }
-
     return null;
+  }
+
+  /**
+   * Draws mcGlow over the hex top face. The shape is 151x76 and sits at the
+   * cell origin, matching the terrain diamond it overlays.
+   */
+  drawGlow(state, screenX, screenY) {
+    const image = this.assets.get(state.asset);
+    if (!image) {
+      return;
+    }
+    this.ctx.save();
+    this.ctx.globalAlpha = state.alpha;
+    this.ctx.drawImage(
+      image, screenX, screenY,
+      image.width * this.zoom, image.height * this.zoom,
+    );
+    this.ctx.restore();
   }
 
   drawHighlight(style, screenX, screenY) {
@@ -3706,22 +5150,31 @@ export class MapRenderer {
   getIconPathsForCell(cell) {
     const damaged = Number(cell.dm || 0) > 0;
     const destroyed = Number(cell.d || 0) === 1;
+    const protectedBase = Number(cell.p || 0) === 1;
 
+    // MapRoomCell's own precedence: protected outranks destroyed, which
+    // outranks damaged. A destroyed base under protection shows the grey
+    // protected frame, not the rubble - so the map never advertises that
+    // someone who cannot currently be attacked is already flattened.
     switch (Number(cell.b)) {
       case MR2.yardTypes.main: {
-        const path = destroyed
-          ? ASSET_PATHS.mainDestroyed
-          : damaged
-            ? ASSET_PATHS.mainDamaged
-            : ASSET_PATHS.mainBase;
+        const path = protectedBase
+          ? ASSET_PATHS.mainProtected
+          : destroyed
+            ? ASSET_PATHS.mainDestroyed
+            : damaged
+              ? ASSET_PATHS.mainDamaged
+              : ASSET_PATHS.mainBase;
         return [path, ASSET_PATHS.playerBase];
       }
       case MR2.yardTypes.outpost: {
-        const path = destroyed
-          ? ASSET_PATHS.outpostDestroyed
-          : damaged
-            ? ASSET_PATHS.outpostDamaged
-            : ASSET_PATHS.outpostBase;
+        const path = protectedBase
+          ? ASSET_PATHS.outpostProtected
+          : destroyed
+            ? ASSET_PATHS.outpostDestroyed
+            : damaged
+              ? ASSET_PATHS.outpostDamaged
+              : ASSET_PATHS.outpostBase;
         return [path, ASSET_PATHS.outpost];
       }
       case MR2.yardTypes.wildMonster: {
@@ -3787,12 +5240,16 @@ export class MapRenderer {
     const columnOffset = estimatedX % 2 ? MR2.oddColumnOffset : 0;
     const estimatedY = Math.floor((worldY - columnOffset) / MR2.cellHeight);
 
-    for (let deltaY = -1; deltaY <= 1; deltaY += 1) {
+    for (let deltaY = -RELIEF_PROBE_ROWS; deltaY <= RELIEF_PROBE_ROWS; deltaY += 1) {
       for (let deltaX = -1; deltaX <= 1; deltaX += 1) {
         const cellX = estimatedX + deltaX;
         const cellY = estimatedY + deltaY;
         const world = this.cellToWorld(cellX, cellY);
-        if (pointInHex(worldX, worldY, world.x, world.y, 1)) {
+        const cached = this.cellCache.get(
+          cellKey(positiveModulo(cellX, mapWidth), positiveModulo(cellY, mapHeight)),
+        );
+        const lift = cached ? this.liftFor(cached) : cellLift(undefined);
+        if (pointInHex(worldX, worldY, world.x, world.y + lift, 1)) {
           return { x: positiveModulo(cellX, mapWidth), y: positiveModulo(cellY, mapHeight) };
         }
       }
@@ -3809,14 +5266,23 @@ export class MapRenderer {
     const columnOffset = estimatedX % 2 ? MR2.oddColumnOffset : 0;
     const estimatedY = Math.floor((world.y - columnOffset) / MR2.cellHeight);
 
-    // Cells later in draw order sit on top, so test candidates in reverse.
+    // Relief moves a cell's artwork up to ~52px up (i=188) or ~64px down
+    // (i=54) from its flat row, which is most of a 75px row pitch - so the
+    // old 3x3 probe could miss the cell the pointer is actually over. Widen
+    // the row span to cover the full range.
     const candidates = [];
-    for (let deltaY = -1; deltaY <= 1; deltaY += 1) {
+    for (let deltaY = -RELIEF_PROBE_ROWS; deltaY <= RELIEF_PROBE_ROWS; deltaY += 1) {
       for (let deltaX = -1; deltaX <= 1; deltaX += 1) {
         candidates.push({ x: estimatedX + deltaX, y: estimatedY + deltaY });
       }
     }
-    candidates.sort((left, right) => (right.y - left.y) || (right.x - left.x));
+    // Cells later in draw order sit on top, so test candidates in reverse of
+    // the depth sort used to draw them.
+    candidates.sort((left, right) => {
+      const a = this.cellToWorld(left.x, left.y);
+      const b = this.cellToWorld(right.x, right.y);
+      return (b.y - a.y) || (b.x - a.x);
+    });
 
     for (const candidate of candidates) {
       const cell = this.cellCache.get(
@@ -3827,7 +5293,8 @@ export class MapRenderer {
       }
 
       const cellWorld = this.cellToWorld(candidate.x, candidate.y);
-      if (pointInHex(world.x, world.y, cellWorld.x, cellWorld.y, 1)) {
+      // Test against where the cell was DRAWN, not its flat row.
+      if (pointInHex(world.x, world.y, cellWorld.x, cellWorld.y + this.liftFor(cell), 1)) {
         return cell;
       }
     }

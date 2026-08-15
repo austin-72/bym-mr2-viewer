@@ -12,348 +12,15 @@
   </head>
   <body>
     <div id="app">
-      <header id="toolbar" class="toolbar">
-        <div class="toolbar-brand" title="Backyard Monsters Refitted - Map Room 2 Viewer">
-          <span class="toolbar-title">MR2 Viewer</span>
-          <span id="world-name" class="toolbar-world">Not connected</span>
-        </div>
+      
 
-        <div class="toolbar-scroll">
-          <div class="tb-group">
-            <!-- Home -->
-            <div class="tb-item">
-              <button
-                id="find-home-button"
-                class="tb-button"
-                type="button"
-                title="Center the map on your main yard"
-                disabled
-              >Home</button>
-            </div>
 
-            <!-- Bookmarks -->
-            <div class="tb-item">
-              <button class="tb-button" type="button" data-menu="menu-bookmarks" aria-expanded="false">Bookmarks</button>
-              <div id="menu-bookmarks" class="tb-menu">
-                <p class="eyebrow">Bookmarks</p>
-                <div class="bookmark-add-row">
-                  <input id="bookmark-name-input" type="text" placeholder="Bookmark name" maxlength="40" disabled>
-                  <button id="bookmark-add-button" class="secondary-button" type="button" disabled>Add</button>
-                </div>
-                <p id="bookmark-help" class="muted nav-help">Saves the selected cell (or the map center).</p>
-                <div id="bookmark-list" class="bookmark-list"></div>
-              </div>
-            </div>
-
-            <!-- Jump -->
-            <div class="tb-item">
-              <button class="tb-button" type="button" data-menu="menu-jump" aria-expanded="false">Jump</button>
-              <div id="menu-jump" class="tb-menu">
-                <p class="eyebrow">Jump</p>
-                <div class="jump-row">
-                  <label class="jump-field" for="jump-x-input">
-                    <span>X</span>
-                    <input id="jump-x-input" type="number" min="0" max="799" inputmode="numeric" placeholder="0" disabled>
-                  </label>
-                  <label class="jump-field" for="jump-y-input">
-                    <span>Y</span>
-                    <input id="jump-y-input" type="number" min="0" max="799" inputmode="numeric" placeholder="0" disabled>
-                  </label>
-                  <button id="jump-button" class="primary-button jump-button" type="button" disabled>Go</button>
-                </div>
-                <p id="jump-status" class="muted nav-help">Jump to any cell by coordinates.</p>
-                <button id="measure-button" class="secondary-button measure-button" type="button" disabled>Measure Distance</button>
-                <p id="measure-status" class="muted nav-help" hidden>Click two cells on the map.</p>
-              </div>
-            </div>
-
-            <!-- Search -->
-          <div class="tb-item map-search-panel" aria-label="Map search">
-            <button
-              id="search-toggle-button"
-              class="tb-button"
-              type="button"
-              aria-expanded="false"
-              title="Search explored bases by username"
-              disabled
-            >Search</button>
-            <div id="menu-search" class="tb-menu">
-              <div class="search-shell">
-                <input
-                  id="search-input"
-                  class="search-input"
-                  type="search"
-                  placeholder="Search by username"
-                  autocomplete="off"
-                  spellcheck="false"
-                  disabled
-                >
-                <div id="search-results" class="search-results" hidden></div>
-              </div>
-              <p id="search-status" class="search-status" hidden></p>
-            </div>
-          </div>
-          </div>
-
-          <div class="tb-group">
-            <!-- Alliance -->
-          <div class="tb-item" id="alliance-item" hidden>
-            <button class="tb-button" type="button" data-menu="menu-alliance" aria-expanded="false">Alliance<span id="alliance-badge" class="alliance-badge" hidden></span></button>
-            <div id="menu-alliance" class="tb-menu">
-              <p class="eyebrow">Alliance</p>
-              <div id="alliance-content" class="alliance-content">
-                <p class="muted">Sign in to use alliances.</p>
-              </div>
-            </div>
-          </div>
-
-            <!-- Watch -->
-          <div class="tb-item">
-            <button class="tb-button" type="button" data-menu="menu-watch" aria-expanded="false">Watch</button>
-            <div id="menu-watch" class="tb-menu">
-              <p class="eyebrow">Watchlist Activity</p>
-              <label class="watch-toggle">
-                <input id="watch-refresh-toggle" type="checkbox" checked disabled>
-                <span>Check your zones hourly</span>
-              </label>
-              <p class="muted nav-help">
-                Watches the zones around your own main yard and outposts. Cached data (from
-                other players' viewers) is checked every 10 minutes without touching the
-                game. A live check runs only once per hour, so the game still sees you as
-                offline and your main base stays attackable.
-              </p>
-              <div class="watch-group">
-                <p class="watch-heading watch-heading-yellow">Your bases</p>
-                <p class="watch-subheading">Recently captured</p>
-                <div id="watch-allies-captured" class="watch-list"></div>
-                <p class="watch-subheading">Recently lost</p>
-                <div id="watch-allies-lost" class="watch-list"></div>
-              </div>
-              <button id="watch-clear-button" class="secondary-button watch-clear" type="button" disabled>Clear Activity</button>
-            </div>
-          </div>
-          </div>
-
-          <div class="tb-group">
-            <!-- Filters (anchor class + behavior preserved) -->
-          <div class="tb-item map-filter-anchor" aria-label="Map filters">
-            <button
-              id="filter-toggle-button"
-              class="tb-button"
-              type="button"
-              aria-label="Show filters"
-              aria-expanded="false"
-              disabled
-            ><span id="filter-toggle-label">Filters</span></button>
-            <div id="filter-menu" class="filter-menu" hidden>
-              <div class="filter-menu-header">
-                <div>
-                  <p class="eyebrow">Filter</p>
-                  <h2>Base Filters</h2>
-                </div>
-                <button id="filter-clear-button" class="secondary-button" type="button">Clear</button>
-              </div>
-              <div class="filter-section">
-                <p class="filter-section-title">Player</p>
-                <div class="search-shell filter-player-shell">
-                  <input
-                    id="filter-player-input"
-                    class="search-input filter-player-input"
-                    type="search"
-                    placeholder="Filter by username"
-                    autocomplete="off"
-                    spellcheck="false"
-                  >
-                  <div id="filter-player-results" class="search-results filter-player-results" hidden></div>
-                </div>
-                <p class="filter-help">Show a player&apos;s main yard and owned outposts.</p>
-              </div>
-              <div class="filter-section">
-                <p class="filter-section-title">Type</p>
-                <div id="filter-type-options" class="filter-options"></div>
-              </div>
-              <div class="filter-section">
-                <p class="filter-section-title">Tribe</p>
-                <div id="filter-tribe-options" class="filter-options"></div>
-              </div>
-              <div class="filter-section">
-                <p class="filter-section-title">Level</p>
-                <div id="filter-level-range" class="filter-level-range">
-                  <div class="filter-level-range-values">
-                    <span id="filter-level-min-label" class="filter-level-range-value">Min -</span>
-                    <span id="filter-level-max-label" class="filter-level-range-value">Max -</span>
-                  </div>
-                  <div class="filter-level-range-track">
-                    <div id="filter-level-range-fill" class="filter-level-range-fill"></div>
-                    <input id="filter-level-min-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="min">
-                    <input id="filter-level-max-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="max">
-                  </div>
-                </div>
-                <p id="filter-level-help" class="filter-help">No wild base levels available.</p>
-              </div>
-              <div class="filter-section">
-                <p class="filter-section-title">Inactivity</p>
-                <label class="filter-inactivity-toggle">
-                  <input id="filter-inactivity-enabled" type="checkbox">
-                  <span>Only players with no new outposts in</span>
-                </label>
-                <div class="filter-level-range">
-                  <div class="filter-level-range-values">
-                    <span id="filter-inactivity-label" class="filter-level-range-value">30+ days</span>
-                  </div>
-                  <div class="filter-level-range-track">
-                    <input id="filter-inactivity-days" class="filter-level-slider" type="range" min="30" max="365" step="5" value="30">
-                  </div>
-                </div>
-                <p class="filter-help">Based on outpost counts observed by this viewer; players first seen recently count as active.</p>
-              </div>
-              <div class="filter-section">
-                <p class="filter-section-title">Outposts</p>
-                <div id="filter-outpost-range" class="filter-level-range">
-                  <div class="filter-level-range-values">
-                    <span id="filter-outpost-label" class="filter-level-range-value">Min -</span>
-                    <span id="filter-outpost-max-label" class="filter-level-range-value">Max -</span>
-                  </div>
-                  <div class="filter-level-range-track">
-                    <div id="filter-outpost-range-fill" class="filter-level-range-fill"></div>
-                    <input id="filter-outpost-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="min">
-                    <input id="filter-outpost-max-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="max">
-                  </div>
-                </div>
-                <p id="filter-outpost-help" class="filter-help">No player outposts explored yet.</p>
-              </div>
-              <div class="filter-menu-footer">
-                <p id="filter-status" class="filter-match-count filter-status">Sign in to enable base filters.</p>
-                <p id="filter-match-count" class="filter-match-count">0 bases shown</p>
-              </div>
-            </div>
-          </div>
-
-            <!-- Worlds -->
-            <div class="tb-item">
-              <button class="tb-button" type="button" data-menu="menu-worlds" aria-expanded="false">Worlds</button>
-              <div id="menu-worlds" class="tb-menu">
-                <p class="eyebrow">Worlds</p>
-                <p class="notice">
-                  Your own world shows live data; any other world shows its shared cached snapshot.
-                </p>
-                <div id="world-list" class="world-list"></div>
-              </div>
-            </div>
-
-            <!-- Leaderboard -->
-            <div class="tb-item">
-              <button class="tb-button" type="button" data-menu="menu-leaderboard" aria-expanded="false">Leaderboard</button>
-              <div id="menu-leaderboard" class="tb-menu">
-                <p class="eyebrow">Leaderboard</p>
-                <h2 id="leaderboard-title">No world selected</h2>
-                <div id="leaderboard-list" class="leaderboard-list"></div>
-              </div>
-            </div>
-          </div>
-                  <!-- Admin tools: unhidden by JS after admin verification; being a
-               separate group draws the "|" separator before Loot. -->
-          <div class="tb-group" id="admin-tools-group" hidden>
-            <!-- Loot (administrators only; shown after admin verification) -->
-          <div class="tb-item" id="loot-item" hidden>
-            <button
-              class="tb-button"
-              type="button"
-              data-menu="menu-loot"
-              aria-expanded="false"
-              title="Show the loot stored in each base on the map (admins only)"
-            >Loot</button>
-            <div id="menu-loot" class="tb-menu">
-              <p class="eyebrow">Loot</p>
-              <label class="loot-check">
-                <input type="checkbox" id="loot-show-toggle">
-                <span>Show loot on map</span>
-              </label>
-              <label class="loot-check">
-                <input type="checkbox" id="loot-info-toggle">
-                <span>Show loot in cell info</span>
-              </label>
-              <p class="eyebrow loot-resource-eyebrow">Resource</p>
-              <div class="loot-resource-list" role="radiogroup" aria-label="Loot resource to display">
-                <label class="loot-radio"><input type="radio" name="loot-resource" value="total" checked><span>Loot (total)</span></label>
-                <label class="loot-radio"><input type="radio" name="loot-resource" value="r1"><span>Twigs</span></label>
-                <label class="loot-radio"><input type="radio" name="loot-resource" value="r2"><span>Pebbles</span></label>
-                <label class="loot-radio"><input type="radio" name="loot-resource" value="r3"><span>Putty</span></label>
-                <label class="loot-radio"><input type="radio" name="loot-resource" value="r4"><span>Goo</span></label>
-              </div>
-            </div>
-          </div>
-
-            <!-- World scan (administrators only) -->
-          <div class="tb-item" id="scan-item" hidden>
-            <button class="tb-button" type="button" data-menu="menu-scan" aria-expanded="false">Scan</button>
-            <div id="menu-scan" class="tb-menu">
-              <p class="eyebrow">World Scan</p>
-              <p class="muted nav-help scan-intro">
-                Downloads every zone in the world (~6,400 requests, roughly 10 minutes) so search,
-                filters, and profiles cover everything. Zones fetched within the last hour are skipped.
-              </p>
-              <button id="scan-button" class="secondary-button" type="button" disabled>Scan World</button>
-              <div id="scan-progress" class="scan-progress" hidden>
-                <div id="scan-progress-fill" class="scan-progress-fill"></div>
-              </div>
-              <p id="scan-status" class="muted nav-help"></p>
-            </div>
-          </div>
-
-            <!-- Admin console (administrators only) -->
-          <div class="tb-item" id="setup-item" hidden>
-            <button id="setup-button" class="tb-button" type="button"
-              title="Open the admin console">Setup</button>
-          </div>
-          </div>
-        </div>
-
-         <div class="toolbar-actions">
-          <!-- Account -->
-          <div class="tb-item tb-item-right session-panel">
-            <div id="session-signed-in" class="session-signed-in" hidden>
-              <div class="session-identity">
-                <span class="session-signed-label">Signed in as:</span>
-                <span id="session-name-display" class="session-name-display"></span>
-              </div>
-              <button id="logout-button" class="secondary-button" type="button">Log out</button>
-            </div>
-            <button id="account-button" class="tb-button tb-account-button" type="button" data-menu="menu-account" aria-expanded="false">
-              <span id="session-name">Sign in</span>
-            </button>
-            <div id="menu-account" class="tb-menu tb-menu-right">
-              <p class="eyebrow">Session</p>
-              <form id="login-form" class="login-form">
-                <label>
-                  <span>Email</span>
-                  <input id="email-input" name="email" type="email" autocomplete="username" required>
-                </label>
-                <label>
-                  <span>Password</span>
-                  <input id="password-input" name="password" type="password" autocomplete="current-password" required>
-                </label>
-                <button id="login-button" class="primary-button" type="submit">Sign in</button>
-              </form>
-              <p id="session-status" class="muted">Sign in with your own BYM credentials.</p>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <div class="corner-buttons">
-      <button id="zoom-in-button" class="corner-button" type="button" aria-label="Zoom in" title="Zoom in">+</button>
-      <button id="zoom-out-button" class="corner-button" type="button" aria-label="Zoom out" title="Zoom out">-</button>
-      <button id="help-button" class="corner-button" type="button" title="Help &amp; privacy">?</button>
-    </div>
 
     <div id="help-panel" class="help-panel" hidden>
-      <div class="help-panel-inner">
-        <div class="help-panel-header">
-          <h2>Help &amp; Privacy</h2>
-          <button id="help-close" class="secondary-button" type="button">Close</button>
-        </div>
-        <div class="help-panel-body">
+      <aside class="panel game-frame help-frame">
+        <button id="help-close" class="popup-close frame-button-close" type="button" aria-label="Close" title="Close">&times;</button>
+        <p class="mr2-modal-message"><strong>Help &amp; Privacy</strong></p>
+        <div class="mr2-modal-card help-card">
           <h3>What this tool is</h3>
           <p>A community world-map viewer for Backyard Monsters Refitted (Map Room 2).
           Pan and zoom the map, search players, view profiles and leaderboards, share
@@ -392,11 +59,11 @@
             <div id="hide-request-form" hidden>
               <textarea id="hide-request-reason" rows="2" maxlength="300"
                 placeholder="Briefly, why do you want your bases hidden?"></textarea>
-              <button id="hide-request-submit" class="secondary-button" type="button">Request hiding</button>
+              <button id="hide-request-submit" class="game-button" type="button">Request hiding</button>
             </div>
           </div>
         </div>
-      </div>
+      </aside>
     </div>
 
     <div id="announcement-banner" class="announcement-banner" hidden>
@@ -420,7 +87,541 @@
               Hover or select a visible MR2 cell to inspect it.
             </div>
           </aside>
+          <div id="left-dock" class="left-dock" hidden>
+          <aside id="tools-panel" class="panel game-frame tools-panel">
+            <button
+              type="button"
+              id="tools-minimize"
+              class="corner-button tools-minimize"
+              aria-label="Minimize tools"
+              title="Minimize"
+            >-</button>
+            <p class="tools-heading" aria-hidden="true">MAP TOOLS</p>
+            <div class="tools-list">
+<div class="tools-row">
+<!-- Home -->
+            <div class="tb-item">
+              <button
+                id="find-home-button"
+                class="game-button"
+                type="button"
+                title="Center the map on your main yard"
+                disabled
+              >Home</button>
+            </div>
+<!-- Jump -->
+            <div class="tb-item">
+              <button id="jump-open-button" class="game-button" type="button" disabled>Jump</button>
+            </div>
+</div>
+            <!-- Measure + Search share a row -->
+            <div class="tools-row">
+            <div class="tb-item">
+              <button
+                id="measure-button"
+                class="game-button"
+                type="button"
+                title="Measure the distance between two cells"
+                disabled
+              >Measure</button>
+            </div>
+            <div class="tb-item">
+              <button
+                id="search-toggle-button"
+                class="game-button"
+                type="button"
+                aria-expanded="false"
+                title="Search explored bases by username"
+                disabled
+              >Search</button>
+            </div>
+            </div>
+            <!-- Export + Bookmarks share a row -->
+            <div class="tools-row">
+            <div class="tb-item">
+              <button id="export-open-button" class="game-button hl" type="button"
+                title="Export player data or a map snapshot">Export</button>
+            </div>
+            <div class="tb-item">
+              <button id="bookmarks-toggle-button" class="game-button" type="button" disabled>Bookmarks</button>
+              <div id="bookmark-flyout" class="bookmark-flyout" hidden></div>
+            </div>
+            </div>
+          </div>
+          </aside>
+          <button
+            id="tools-restore"
+            class="tools-restore"
+            type="button"
+            aria-label="Open map tools"
+            title="Map tools"
+          >
+            <span class="tools-restore-plus" aria-hidden="true"></span>
+            <span class="tools-restore-label" aria-hidden="true">MAP TOOLS</span>
+          </button>
+          <div class="dock-item" id="alliance-item" hidden>
+            <button class="dock-bar" id="dock-alliance-bar" type="button" aria-label="Open Alliance">
+              <span class="tools-restore-plus" aria-hidden="true"></span>
+              <span class="tools-restore-label" aria-hidden="true">ALLIANCE</span><span id="alliance-badge" class="alliance-badge" hidden></span>
+            </button>
+            <aside class="panel game-frame dock-panel" id="dock-alliance-panel" hidden>
+              <button type="button" id="dock-alliance-min" class="corner-button dock-minimize" aria-label="Minimize" title="Minimize">-</button>
+              <p class="tools-heading">ALLIANCE</p>
+              <div class="dock-content">
+              <div id="alliance-content" class="alliance-content">
+                <p class="muted">Sign in to use alliances.</p>
+              </div>
+            </div>
+            </aside>
+          </div>
+          <div class="dock-item" id="dock-activity">
+            <button class="dock-bar" id="dock-activity-bar" type="button" aria-label="Open Activity">
+              <span class="tools-restore-plus" aria-hidden="true"></span>
+              <span class="tools-restore-label" aria-hidden="true">ACTIVITY</span>
+            </button>
+            <aside class="panel game-frame dock-panel" id="dock-activity-panel" hidden>
+              <button type="button" id="dock-activity-min" class="corner-button dock-minimize" aria-label="Minimize" title="Minimize">-</button>
+              <p class="tools-heading">ACTIVITY</p>
+              <div class="dock-content">
+              
+              
+              <p id="activity-status" class="muted nav-help activity-status" hidden></p>
+              <div class="watch-group">
+                <div class="activity-tabs" role="tablist" aria-label="Activity scope">
+                  <button class="activity-tab active" type="button" role="tab" data-activity-tab="me" aria-selected="true">Me</button>
+                  <button class="activity-tab" type="button" role="tab" data-activity-tab="allies" aria-selected="false">Allies</button>
+                  <button class="activity-tab" type="button" role="tab" data-activity-tab="enemies" aria-selected="false">Enemies</button>
+                  <button class="activity-tab" type="button" role="tab" data-activity-tab="server" aria-selected="false">Server</button>
+                </div>
+                <p class="watch-subheading">Captures, losses and main yard moves, newest first.</p>
+                <div id="activity-list" class="watch-list activity-list"></div>
+              </div>
+            </div>
+            </aside>
+          </div>
+          
+          
+          </div>
+          
+          <div id="right-dock" class="right-dock" hidden>
+          <div class="dock-item" id="dock-filters">
+            <button class="dock-bar" id="dock-filters-bar" type="button" aria-label="Open Filters">
+              <span class="tools-restore-plus" aria-hidden="true"></span>
+              <span class="tools-restore-label" aria-hidden="true">FILTERS</span>
+            </button>
+            <aside class="panel game-frame dock-panel" id="dock-filters-panel" hidden>
+              <button type="button" id="dock-filters-min" class="corner-button dock-minimize" aria-label="Minimize" title="Minimize">-</button>
+              <p class="tools-heading">FILTERS</p>
+              <div class="dock-content"><button
+              id="filter-toggle-button"
+              class="tb-button" hidden
+              type="button"
+              aria-label="Show filters"
+              aria-expanded="false"
+              disabled
+            ><span id="filter-toggle-label">Filters</span></button><div id="filter-menu" class="filter-menu">
+              <div class="filter-menu-header">
+                <div></div>
+                <button id="filter-clear-button" class="game-button hl" type="button">Clear</button>
+              </div>
+              <div class="filter-card" data-card="player">
+                <div class="filter-card-head">
+                  <p class="filter-card-title">Player <span class="filter-card-badge" hidden></span></p>
+                  <button type="button" class="filter-card-reset" data-card-reset="player" hidden>reset</button>
+                </div>
+                <div class="search-shell filter-player-shell">
+                  <input
+                    id="filter-player-input"
+                    class="search-input filter-player-input"
+                    type="search"
+                    placeholder="Filter by username"
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                  <div id="filter-player-results" class="search-results filter-player-results" hidden></div>
+                </div>
+                <div id="filter-player-list" class="filter-player-list" hidden></div>
+              </div>
+              <div class="filter-card" data-card="cell">
+                <div class="filter-card-head">
+                  <p class="filter-card-title">Cell <span class="filter-card-badge" hidden></span></p>
+                  <button type="button" class="filter-card-reset" data-card-reset="cell" hidden>reset</button>
+                </div>
+                <div id="filter-type-options" class="filter-options"></div>
+                <div id="filter-height-options" class="filter-options filter-options-wrap"></div>
+              </div>
+              <div class="filter-card" data-card="outposts">
+                <div class="filter-card-head">
+                  <p class="filter-card-title">Outposts <span class="filter-card-badge" hidden></span></p>
+                  <button type="button" class="filter-card-reset" data-card-reset="outposts" hidden>reset</button>
+                </div>
+                <div class="filter-subrow"><span class="filter-subrow-label">Type</span><div id="filter-kit-options" class="filter-options"></div></div>
+                <div class="filter-subrow"><span class="filter-subrow-label">Owner</span><div id="filter-owner-options" class="filter-options"></div></div>
+              </div>
+              <div class="filter-card" data-card="wild">
+                <div class="filter-card-head">
+                  <p class="filter-card-title">Wild Monster Tribes <span class="filter-card-badge" hidden></span></p>
+                  <button type="button" class="filter-card-reset" data-card-reset="wild" hidden>reset</button>
+                </div>
+                <div id="filter-tribe-options" class="filter-options"></div>
+                <div id="filter-level-range" class="filter-level-range">
+                  <div class="filter-level-range-values">
+                    <span id="filter-level-min-label" class="filter-level-range-value">Min -</span>
+                    <span id="filter-level-max-label" class="filter-level-range-value">Max -</span>
+                  </div>
+                  <div class="filter-level-range-track">
+                    <div id="filter-level-range-fill" class="filter-level-range-fill"></div>
+                    <input id="filter-level-min-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="min">
+                    <input id="filter-level-max-input" class="filter-level-slider" type="range" min="0" max="0" step="1" value="0" data-bound="max">
+                  </div>
+                </div>
+                <p id="filter-level-help" class="filter-help">No wild base levels available.</p>
+              </div>
+              <div class="filter-card" data-card="damage">
+                <div class="filter-card-head">
+                  <p class="filter-card-title">Damage <span class="filter-card-badge" hidden></span></p>
+                  <button type="button" class="filter-card-reset" data-card-reset="damage" hidden>reset</button>
+                </div>
+                <div id="filter-damage-range" class="filter-level-range">
+                  <div class="filter-level-range-values">
+                    <span id="filter-damage-min-label" class="filter-level-range-value">Min 0%</span>
+                    <span id="filter-damage-max-label" class="filter-level-range-value">Max 100%</span>
+                  </div>
+                  <div class="filter-level-range-track">
+                    <div id="filter-damage-range-fill" class="filter-level-range-fill"></div>
+                    <input id="filter-damage-min-input" class="filter-level-slider" type="range" min="0" max="100" step="1" value="0" data-bound="min">
+                    <input id="filter-damage-max-input" class="filter-level-slider" type="range" min="0" max="100" step="1" value="100" data-bound="max">
+                  </div>
+                </div>
+                <label class="filter-inactivity-toggle">
+                  <input id="filter-protection-yes" type="checkbox" checked>
+                  <span>Damage protection</span>
+                </label>
+                <label class="filter-inactivity-toggle">
+                  <input id="filter-protection-no" type="checkbox" checked>
+                  <span>No damage protection</span>
+                </label>
+              </div>
+              <div class="filter-card" data-card="misc">
+                <div class="filter-card-head">
+                  <p class="filter-card-title">Miscellaneous <span class="filter-card-badge" hidden></span></p>
+                  <button type="button" class="filter-card-reset" data-card-reset="misc" hidden>reset</button>
+                </div>
+                <label class="filter-inactivity-toggle">
+                  <input id="filter-flinger-enabled" type="checkbox">
+                  <span>In flinger range of</span>
+                </label>
+                <div id="filter-flinger-options" class="filter-options"></div>
+                <label class="filter-inactivity-toggle filter-inactive-line">
+                  <input id="filter-inactivity-enabled" type="checkbox">
+                  <span>Inactive (seen &gt;</span>
+                  <input id="filter-inactivity-days" class="filter-days-input" type="number" min="1" max="365" step="1" value="30">
+                  <span>days ago)</span>
+                </label>
+              </div>
+              <div class="filter-menu-footer">
+                <p id="filter-status" class="filter-match-count filter-status">Sign in to enable base filters.</p>
+                <p id="filter-match-count" class="filter-match-count">0 bases shown</p>
+              </div>
+            </div></div>
+            </aside>
+          </div>
+          <div class="dock-item" id="dock-leaderboard">
+            <button class="dock-bar" id="dock-leaderboard-bar" type="button" aria-label="Open Leaderboard">
+              <span class="tools-restore-plus" aria-hidden="true"></span>
+              <span class="tools-restore-label" aria-hidden="true">LEADERBOARD</span>
+            </button>
+            <aside class="panel game-frame dock-panel" id="dock-leaderboard-panel" hidden>
+              <button type="button" id="dock-leaderboard-min" class="corner-button dock-minimize" aria-label="Minimize" title="Minimize">-</button>
+              <p class="tools-heading">LEADERBOARD</p>
+              <div class="dock-content">
+                <h2 id="leaderboard-title">No world selected</h2>
+                <div id="leaderboard-list" class="leaderboard-list"></div>
+              </div>
+            </aside>
+          </div>
+          <div class="dock-item" id="dock-settings">
+            <button class="dock-bar" id="dock-settings-bar" type="button" aria-label="Open Settings">
+              <span class="tools-restore-plus" aria-hidden="true"></span>
+              <span class="tools-restore-label" aria-hidden="true">SETTINGS</span>
+            </button>
+            <aside class="panel game-frame dock-panel" id="dock-settings-panel" hidden>
+              <button type="button" id="dock-settings-min" class="corner-button dock-minimize" aria-label="Minimize" title="Minimize">-</button>
+              <p class="tools-heading">SETTINGS</p>
+              <div class="dock-content">
+                <div id="loot-item" class="settings-section" hidden>
+                  <p class="settings-section-title">Loot</p>
+              <label class="loot-check">
+                <input type="checkbox" id="loot-show-toggle">
+                <span>Show loot on map</span>
+              </label>
+              <div class="loot-resource-indent">
+              <p class="eyebrow loot-resource-eyebrow">Resource</p>
+              <div class="loot-resource-list" role="radiogroup" aria-label="Loot resource to display">
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="tier"><span>Loot percentile</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="total" checked><span>Loot (total)</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r1"><span>Twigs</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r2"><span>Pebbles</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r3"><span>Putty</span></label>
+                <label class="loot-radio"><input type="radio" name="loot-resource" value="r4"><span>Goo</span></label>
+              </div>
+              </div>
+              <label class="loot-check">
+                <input type="checkbox" id="loot-info-toggle">
+                <span>Show loot in cell info</span>
+              </label>
+              <p class="settings-section-title">Outposts</p>
+              <label class="loot-check"><input id="outpost-type-toggle" type="checkbox"> Show outpost type on map</label>
+              <label class="loot-check"><input id="idle-worker-toggle" type="checkbox" checked> Show inactive workers on my outposts</label>
+              <p class="settings-section-title">Activity</p>
+              <label class="watch-toggle">
+                <input id="watch-refresh-toggle" type="checkbox" checked disabled>
+                <span>Check your zones hourly</span>
+              </label>
+              <p class="muted nav-help">
+                Your and your allies' zones (plus one surrounding ring) are checked from the
+                shared cache every 10 minutes and live once per hour; your own zones refresh
+                live every 5 minutes. Your session token is quietly refreshed every 60
+                seconds so live checks keep working. Untick to stop all
+                background checks and the keepalive.
+              </p>
+
+            
+                </div>
+                <div id="scan-item" class="settings-section" hidden>
+                  <p class="settings-section-title">World Scan</p>
+              <p class="muted nav-help scan-intro">
+                Downloads every zone in the world (~6,400 requests, roughly 10 minutes) so search,
+                filters, and profiles cover everything. Zones fetched within the last hour are skipped.
+              </p>
+              <button id="scan-button" class="game-button hl" type="button" disabled>Scan World</button>
+              <div id="scan-progress" class="scan-progress" hidden>
+                <div id="scan-progress-fill" class="scan-progress-fill"></div>
+              </div>
+              <p id="scan-status" class="muted nav-help"></p>
+              <p class="muted nav-help scan-intro">
+                Loads every explored player main yard once (one /base/load each) so the
+                server archives a baseload snapshot per player for analysis.
+              </p>
+              <button id="scan-bases-button" class="game-button hl" type="button" disabled>Scan Bases</button>
+              <div id="scan-bases-progress" class="scan-progress" hidden>
+                <div id="scan-bases-progress-fill" class="scan-progress-fill"></div>
+              </div>
+              <p id="scan-bases-status" class="muted nav-help"></p>
+            
+                </div>
+                <div id="setup-item" class="settings-section" hidden>
+                  <p class="settings-section-title">Admin Console</p>
+                  <button id="setup-button" class="game-button hl" type="button"
+                    title="Open the admin console">Setup</button>
+                </div>
+                <p id="settings-empty-note" class="muted">No settings available for this account.</p>
+</div>
+            </aside>
+          </div>
+          
+          </div>
+          <div id="top-strip" class="panel game-frame top-strip" hidden>
+            <div class="mr2-modal-card top-strip-card session-panel">
+              <span class="strip-row">
+                <span id="world-cached-prefix" hidden>cached&nbsp;</span>
+                <span id="world-name" class="strip-world">Not connected</span>
+                <button id="world-open-button" class="world-open-link" type="button">(switch)</button>
+              </span>
+              <span class="strip-row">
+              <span id="session-signed-in" class="strip-session" hidden>
+                <span id="session-name-display" class="strip-name"></span>
+                <button id="logout-button" class="game-button strip-auth hl" type="button">Log out</button>
+              </span>
+              <span class="strip-session strip-guest">
+                <button id="account-button" class="game-button strip-auth" type="button"><span id="session-name">Log in</span></button>
+                <span class="strip-not-signed">Not signed in</span>
+              </span>
+              </span>
+            </div>
+          </div>
+          <aside id="battlelogs-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="battlelogs-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card battlelogs-card">
+              <p id="battlelogs-title" class="mr2-modal-message"><strong>Battle Logs</strong></p>
+              <div id="battlelogs-list"></div>
+              <div id="battlelogs-report"></div>
+            </div>
+          </aside>
+          <aside id="export-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="export-modal-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card export-card">
+              <p class="mr2-modal-message"><strong>What would you like to export?</strong></p>
+              <label class="export-choice"><input type="radio" name="export-type" value="csv" checked> Player list (CSV)
+                <span class="export-sub">Everything the viewer knows about each player</span></label>
+              <label class="export-choice"><input type="radio" name="export-type" value="png"> Map snapshot (PNG)
+                <span class="export-sub">Drag a box on the map; corners can be adjusted before saving</span></label>
+              <div id="export-csv-options">
+                <hr class="export-rule">
+                <p class="export-heading">Players to include:</p>
+                <label class="export-choice"><input type="radio" name="export-scope" value="top100"> Top 100 (served leaderboard)</label>
+                <label class="export-choice"><input type="radio" name="export-scope" value="filtered" checked> Current filter results</label>
+                <label class="export-choice"><input type="radio" name="export-scope" value="all"> Everyone cached</label>
+                <p class="export-heading">Columns:</p>
+                <div class="export-cols">
+                  <label><input type="checkbox" data-export-col="identity" checked> Identity (name, uid, level)</label>
+                  <label><input type="checkbox" data-export-col="position" checked> Position (main x,y)</label>
+                  <label><input type="checkbox" data-export-col="outposts" checked> Outposts + kits (N/R/M/U)</label>
+                  <label><input type="checkbox" data-export-col="alliance" checked> Alliance</label>
+                  <label><input type="checkbox" data-export-col="deltas" checked> 1/7/30-day deltas</label>
+                  <label><input type="checkbox" data-export-col="status"> Damage + last updated</label>
+                  <label><input type="checkbox" data-export-col="loot"> Loot (twigs/pebbles/putty/goo)</label>
+                  <label><input type="checkbox" data-export-col="outpost-rows"> List each outpost under its owner</label>
+                  <label><input type="checkbox" data-export-col="history30"> 30-day outpost count history</label>
+                </div>
+                <p id="export-count-note" class="export-note">&nbsp;</p>
+              </div>
+              <div id="export-png-options" hidden>
+                <hr class="export-rule">
+                <p class="export-heading">Detail:</p>
+                <label class="export-choice"><input type="radio" name="export-lod" value="high" checked> High LOD (tile art)</label>
+                <label class="export-choice"><input type="radio" name="export-lod" value="low"> Low LOD (map view)</label>
+                <p class="export-heading">Resolution:</p>
+                <label class="export-choice"><input type="radio" name="export-res" value="std"> Standard</label>
+                <label class="export-choice"><input type="radio" name="export-res" value="high" checked> High</label>
+                <label class="export-choice"><input type="radio" name="export-res" value="max"> Maximum</label>
+                <p class="export-heading">Burn into the image:</p>
+                <div class="export-cols">
+                  <label><input type="checkbox" data-export-anno="labels" checked> Player name labels</label>
+                  <label><input type="checkbox" data-export-anno="legend" checked> Ownership legend</label>
+                  <label><input type="checkbox" data-export-anno="stamp" checked> Server + date stamp</label>
+                </div>
+                <p class="export-note">Export starts region selection: drag a box, then drag any corner to adjust.</p>
+              </div>
+              <div class="account-btn-row">
+                <button id="export-cancel-button" class="game-button" type="button">Cancel</button>
+                <button id="export-go-button" class="game-button hl" type="button">Export</button>
+              </div>
+            </div>
+          </aside>
+          <aside id="account-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="account-modal-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card account-modal-card">
+              <div id="menu-account">
+              <p class="eyebrow">Session</p>
+              <div class="login-mode-tabs" role="tablist" aria-label="Sign-in method">
+                <button id="login-mode-password" class="game-button login-mode-tab active" type="button" role="tab" aria-selected="true" data-login-mode="password">Password</button>
+                <button id="login-mode-token" class="game-button login-mode-tab" type="button" role="tab" aria-selected="false" data-login-mode="token">Passwordless</button>
+              </div>
+
+              <form id="login-form" class="login-form login-mode-panel" data-login-panel="password">
+                <label>
+                  <span>Email</span>
+                  <input id="email-input" name="email" type="email" autocomplete="username" required>
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input id="password-input" name="password" type="password" autocomplete="current-password" required>
+                </label>
+                <div class="account-btn-row">
+                  <button id="view-guest-button" class="game-button account-guest-btn hl" type="button">View as guest</button>
+                  <button id="login-button" class="game-button account-action" type="submit">Sign in</button>
+                </div>
+              </form>
+
+              <div id="token-login-panel" class="login-mode-panel" data-login-panel="token" hidden>
+                
+                <ol class="token-login-steps">
+                  <li>Launch the game and log in.</li>
+                  <li>
+                    Copy the script:
+                    <button id="token-copy-script-button" class="game-button token-copy-script" type="button">Copy script</button>
+                  </li>
+                  <li>Press <b>Windows + R</b>.</li>
+                  <li>Press <b>Ctrl + V</b>, then <b>Enter</b> (a window flashes; the token is now copied).</li>
+                  <li>Paste the token below.</li>
+                  <li>Click <b>Log in</b>.</li>
+                </ol>
+                <input id="attach-token-input" type="password" autocomplete="new-password" value="" spellcheck="false"
+                  placeholder="Paste your token (Ctrl + V)">
+                <div class="account-btn-row">
+                  <button class="game-button account-guest-btn hl" type="button">View as guest</button>
+                  <button id="attach-token-button" class="game-button account-action" type="button">Log in</button>
+                </div>
+                <p class="token-login-note muted nav-help">
+                  This is a normal, full session - identical to signing in with your
+                  password. It just skips typing the password.
+                </p>
+              </div>
+
+              <p id="session-status" class="muted">Sign in with your own BYM credentials.</p></div>
+            </div>
+          </aside>
+          <div id="mr2-modal-blocker" class="mr2-modal-blocker" hidden></div>
+          <aside id="jump-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="jump-modal-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card">
+              <p class="mr2-modal-message"><strong>Jump to location:</strong></p>
+              <div class="mr2-modal-fields">
+                <input id="jump-x-input" class="mr2-modal-input" type="text" inputmode="numeric" autocomplete="off">
+                <span class="mr2-modal-x">x</span>
+                <input id="jump-y-input" class="mr2-modal-input" type="text" inputmode="numeric" autocomplete="off">
+                <button id="jump-button" class="game-button mr2-modal-action" type="button">Jump</button>
+              </div>
+            </div>
+          </aside>
+          <aside id="worlds-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="worlds-modal-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card">
+              <p class="mr2-modal-message"><strong>Servers:</strong></p>
+              <div id="world-list" class="worlds-modal-list"></div>
+            </div>
+          </aside>
+          <aside id="search-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="search-modal-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card">
+              <p class="mr2-modal-message"><strong>Search by username:</strong></p>
+              <div class="search-shell">
+                <input
+                  id="search-input"
+                  class="mr2-modal-input mr2-modal-name search-input"
+                  type="search"
+                  placeholder="Search by username"
+                  autocomplete="off"
+                  spellcheck="false"
+                  disabled
+                >
+                <div id="search-results" class="search-results" hidden></div>
+              </div>
+              <p id="search-status" class="search-status" hidden></p>
+            </div>
+          </aside>
+          <aside id="bookmark-add-modal" class="panel game-frame mr2-modal" hidden>
+            <button type="button" id="bookmark-add-close" class="popup-close frame-button-close" aria-label="Close" title="Close">&times;</button>
+            <div class="mr2-modal-card">
+              <p class="mr2-modal-message"><strong>New Bookmark</strong><br>
+                <span class="mr2-modal-sub">Name this bookmark and press Save</span></p>
+              <div class="mr2-modal-fields">
+                <input id="bookmark-name-input" class="mr2-modal-input mr2-modal-name" type="text" maxlength="40" autocomplete="off">
+                <button id="bookmark-add-button" class="game-button mr2-modal-action" type="button">Save</button>
+              </div>
+            </div>
+          </aside>
+          <div id="export-select-layer" hidden>
+            <div id="export-select-box"></div>
+            <div class="export-select-toolbar">
+              <span id="export-select-dims"></span>
+              <button id="export-select-go" class="game-button hl" type="button">Export</button>
+              <button id="export-select-cancel" class="game-button" type="button">Cancel</button>
+            </div>
+          </div>
+          <div class="corner-buttons" hidden>
+                  <div id="zoom-slider" class="zoom-slider">
+                    <button id="zoom-slider-in" class="zoom-slider-btn zoom-slider-plus" type="button" aria-label="Zoom in" title="Zoom in"></button>
+                    <div id="zoom-slider-track" class="zoom-slider-track">
+                      <div id="zoom-slider-thumb" class="zoom-slider-thumb"></div>
+                    </div>
+                    <button id="zoom-slider-out" class="zoom-slider-btn zoom-slider-minus" type="button" aria-label="Zoom out" title="Zoom out"></button>
+                  </div>
+                  <button id="help-button" class="corner-button" type="button" title="Help &amp; privacy">?</button>
+    </div>
           <div id="map-coordinates" class="map-coordinates" hidden>Cell -, -</div>
+          <div id="measure-status" class="measure-pill" hidden>Click a cell to place the first point.</div>
           <div id="map-overlay" class="map-overlay">
             <div class="map-overlay-card">
               <div class="map-overlay-message">Loading...</div>

@@ -179,22 +179,49 @@
       .status.error { color: #ff8d7d; }
       .audit-entry { font-size: 12.5px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
       .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgba(242,199,107,0.18); font-size: 11.5px; }
+
+      /* ── Tabs (Admin console / Server ops) ─────────────────────────── */
+      /* Rail tabs step out of the stone-button theme: they are navigation,
+         not actions, so they read as quiet labels with a gold underline on
+         the active view. */
+      .tabs { display: none; gap: 2px; border-bottom: 1px solid rgba(255, 255, 255, 0.12); }
+      .tabs.shown { display: flex; }
+      button.tab {
+        border: 0; border-image: none; border-radius: 0;
+        background: none; background-color: transparent;
+        color: #a99f8c; font-weight: 700; text-shadow: none;
+        padding: 9px 14px 11px; margin-bottom: -1px;
+        border-bottom: 2px solid transparent;
+      }
+      button.tab:hover:not(:disabled), button.tab:focus-visible:not(:disabled) {
+        border-image: none; background: rgba(255, 255, 255, 0.03);
+        color: #efe8da; text-shadow: none;
+      }
+      button.tab:focus-visible { outline: 2px solid #f2c76b; outline-offset: -2px; }
+      button.tab:active:not(:disabled) { filter: none; }
+      button.tab[aria-selected="true"] { color: #f2c76b; border-bottom-color: #f2c76b; }
     </style>
   </head>
   <body>
     <main>
-      <div class="row" style="justify-content: flex-start;">
+      <div class="row" style="justify-content: space-between;">
+        <h1>Viewer Setup <span class="pill">administrators only</span></h1>
         <a href="/" style="text-decoration: none;"><button type="button">&larr; Back to map</button></a>
       </div>
-      <h1>Viewer Setup <span class="pill">administrators only</span></h1>
+      <nav class="tabs" id="setup-tabs" role="tablist" aria-label="Console views">
+        <button type="button" class="tab" id="tab-console" role="tab"
+          aria-selected="true" aria-controls="console-mount">Admin console</button>
+        <button type="button" class="tab" id="tab-ops" role="tab"
+          aria-selected="false" aria-controls="ops-mount">Server ops</button>
+      </nav>
 
       <section id="identity">
         <h2>Sign in</h2>
-        <p class="muted">
+        <p class="muted" id="identity-blurb">
           Sign in with your BYM account. The viewer server verifies your session
           directly with the game server; access is limited to administrator accounts.
         </p>
-        <div class="row" style="margin: 10px 0;">
+        <div class="row" style="margin: 10px 0;" id="identity-row">
           <input id="email-input" type="email" placeholder="Email" autocomplete="username">
           <input id="password-input" type="password" placeholder="Password" autocomplete="current-password">
           <button id="login-button">Sign in</button>
@@ -211,6 +238,7 @@
       </div>
 
 <div id="console-mount"></div>
+<div id="ops-mount" style="display:none;"></div>
     </main>
 
     <script type="module">
@@ -316,6 +344,43 @@
           };
           adminAdd.addEventListener("click", submitAdmin);
           $("admin-name").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAdmin(); });
+        }
+
+        const renameApply = $("rename-apply");
+        if (renameApply && !renameApply.dataset.wired) {
+          renameApply.dataset.wired = "1";
+          const submitRename = async () => {
+            const from = $("rename-from").value.trim();
+            const to = $("rename-to").value.trim();
+            if (!from || !to) { setStatus("rename-status", "Enter both the old and the new name.", true); return; }
+            if (!window.confirm(`Move all viewer data for "${from}" to "${to}"?\n\nThis rewrites their settings folder, alliance seat, allowlist entries and activity. Only do this for a rename that really happened in the game.`)) {
+              return;
+            }
+            try {
+              const { summary } = await api("/api/admin/rename-user", {
+                method: "POST",
+                body: JSON.stringify({ from, to }),
+              });
+              $("rename-from").value = "";
+              $("rename-to").value = "";
+              const bits = [];
+              if (summary.userDir === "moved") bits.push("user folder moved");
+              if (summary.alliances) bits.push(`${summary.alliances} alliance file${summary.alliances === 1 ? "" : "s"}`);
+              if (summary.admins) bits.push("admin allowlist");
+              if (summary.whitelist) bits.push("whitelist");
+              if (summary.hidden) bits.push("hidden players");
+              if (summary.activityWorlds) bits.push(`activity in ${summary.activityWorlds} world${summary.activityWorlds === 1 ? "" : "s"}`);
+              setStatus("rename-status", bits.length
+                ? `Moved ${from} \u2192 ${to}: ${bits.join(", ")}.`
+                : `Nothing stored under "${from}" was found \u2014 checked the user folder, alliances, allowlists and activity.`,
+                !bits.length);
+              await Promise.all([renderRenames(), renderAdmins(), renderOverview(), renderAlliances(), renderWhitelist(), renderHidden()]);
+            } catch (error) { setStatus("rename-status", error.message, true); }
+          };
+          renameApply.addEventListener("click", submitRename);
+          for (const id of ["rename-from", "rename-to"]) {
+            $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") submitRename(); });
+          }
         }
       }
 
@@ -784,6 +849,28 @@
         $("announcement-text").value = payload.text || "";
       }
 
+      async function renderRenames() {
+        // Guard: the running dev_server.py may predate the renames API; the
+        // card then just shows an explanatory row instead of breaking the
+        // whole console load (this runs inside the enterConsole Promise.all).
+        let renames = [];
+        try {
+          ({ renames } = await api("/api/admin/renames"));
+        } catch (error) {
+          $("rename-rows").innerHTML =
+            `<tr><td colspan="3" class="muted">${escapeHtml(error.message)}</td></tr>`;
+          return;
+        }
+        $("rename-rows").innerHTML = renames.length
+          ? renames.map((entry) => `
+              <tr>
+                <td><strong>${escapeHtml(entry.name)}</strong></td>
+                <td>${entry.previous.map((p) => escapeHtml(p)).join(", ")}</td>
+                <td class="muted">${escapeHtml((entry.updatedAt || "-").replace("T", " ").slice(0, 16))}</td>
+              </tr>`).join("")
+          : '<tr><td colspan="3" class="muted">No renames recorded yet. They appear here automatically when a renamed player signs in.</td></tr>';
+      }
+
       async function renderAdmins() {
         const { admins, you } = await api("/api/admin/admins");
         const canRemove = admins.length > 1;
@@ -892,8 +979,17 @@
             consoleLoaded = true;
             wireConsole();
           }
+          // The ops console is a self-contained fragment WITH an inline
+          // <script>. innerHTML does not execute scripts, so its tags are
+          // re-created below (see loadOps) - without that the markup appears
+          // and nothing ever populates it.
+          $("setup-tabs").classList.add("shown");
+          // The form has done its job: fold it down to a one-line receipt so
+          // the console is the first thing on screen.
+          $("identity-row").style.display = "none";
+          $("identity-blurb").textContent = `Signed in as ${user} (administrator).`;
           setStatus("identity-status", `Verified as administrator ${user}.`);
-          await Promise.all([renderHidden(), renderAnnouncement(), renderAdmins(), renderOverview(), renderAlliances(), renderSettings(), renderHideRequests(), renderWhitelist()]);
+          await Promise.all([renderHidden(), renderAnnouncement(), renderAdmins(), renderOverview(), renderAlliances(), renderSettings(), renderHideRequests(), renderWhitelist(), renderRenames()]);
         } catch (error) {
           // A 404 here usually means the request fell through to static file
           // serving: the running dev_server.py predates the admin console.
@@ -908,6 +1004,65 @@
           );
         }
       }
+
+      // ---- server ops console ------------------------------------------
+      let opsLoaded = false;
+
+      async function loadOps() {
+        if (opsLoaded) return;
+        const response = await fetch("/api/admin/ops/console", {
+          headers: { "X-Viewer-Token": authToken },
+        });
+        if (!response.ok) {
+          throw new Error("Could not load the ops console. If this is a 404, "
+            + "dev_server.py predates it - replace it and restart Python.");
+        }
+        const mount = $("ops-mount");
+        mount.innerHTML = await response.text();
+
+        // ops.html authenticates with the same token this page holds. It reads
+        // window.VIEWER_TOKEN, so publish it before the script runs; the
+        // localStorage key it falls back to is a different one from the key
+        // buildTokenStorageKey() produces, so without this every request the
+        // panel makes would be unauthenticated.
+        window.VIEWER_TOKEN = authToken;
+
+        // innerHTML parses <script> but never runs it. Re-create each one so
+        // the browser executes it. This is the step whose absence made the
+        // panel render as an empty shell.
+        for (const original of Array.from(mount.querySelectorAll("script"))) {
+          const replacement = document.createElement("script");
+          for (const attribute of Array.from(original.attributes)) {
+            replacement.setAttribute(attribute.name, attribute.value);
+          }
+          replacement.textContent = original.textContent;
+          original.replaceWith(replacement);
+        }
+        opsLoaded = true;
+      }
+
+      // Tab rail. The console tab is always safe to show; the ops tab lazily
+      // fetches its fragment on first use and stays on the console if that
+      // fails, so a stale dev_server.py degrades to a visible error rather
+      // than an empty view.
+      function selectTab(which) {
+        const showOps = which === "tab-ops";
+        $("console-mount").style.display = showOps ? "none" : "";
+        $("ops-mount").style.display = showOps ? "" : "none";
+        $("tab-console").setAttribute("aria-selected", showOps ? "false" : "true");
+        $("tab-ops").setAttribute("aria-selected", showOps ? "true" : "false");
+      }
+      $("tab-console").addEventListener("click", () => selectTab("tab-console"));
+      $("tab-ops").addEventListener("click", async () => {
+        try {
+          if (!opsLoaded) setStatus("identity-status", "Loading ops console...");
+          await loadOps();
+          selectTab("tab-ops");
+          setStatus("identity-status", "");
+        } catch (error) {
+          setStatus("identity-status", error.message, true);
+        }
+      });
 
       // Admins sign in against the same fixed BYM game server the main viewer
       // uses (STABLE_VIEWER_CONFIG), never the localhost dev defaults. The

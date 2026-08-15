@@ -53,7 +53,14 @@ export const PACER_AGE_CEILING = 8;
 export function agedPriority(base, waitingSinceMs, now = Date.now()) {
   const tier = Number(base) || 1;
   if (tier >= PACER_AGE_CEILING) return tier;
-  const steps = Math.floor(Math.max(0, now - waitingSinceMs) / PACER_AGE_STEP_MS);
+  // Math.max(0, NaN) is NaN, so a missing timestamp would poison the whole
+  // expression and return NaN -- and NaN loses every comparison in the
+  // pacer's selection loop, so that waiter could never win a slot. Fall back
+  // to the unaged tier, which is the conservative reading of "we do not know
+  // how long this has waited".
+  const since = Number(waitingSinceMs);
+  if (!Number.isFinite(since)) return tier;
+  const steps = Math.floor(Math.max(0, now - since) / PACER_AGE_STEP_MS);
   return Math.min(PACER_AGE_CEILING, tier + steps);
 }
 
@@ -66,6 +73,11 @@ export class ApiClient {
     // (single-flight) and returns it.
     this.getCurrentToken = null;
     this.refreshSession = null;
+    // Set once session recovery has failed; cleared when a new token is
+    // adopted. While set, token-bearing calls fail fast instead of spending
+    // another getinfo per 401. onAuthExpired is wired by the app.
+    this.authExpired = false;
+    this.onAuthExpired = null;
     // Priority-ordered waiters for the zone-request pacer.
     this.zoneWaiters = new Set();
     this.zoneWaiterSeq = 0;
@@ -135,6 +147,47 @@ export class ApiClient {
     return this.buildSession(loginResponse);
   }
 
+  /**
+   * Builds a session from an EXISTING live token without rotating it - the
+   * basis of shared-token mode, where the game client and the viewer ride
+   * the same session. Every call here (getnewmap, base/load) leaves the
+   * token untouched; only getinfo mints/invalidates, and this path never
+   * calls it. User identity comes from the player's own base save, since
+   * getinfo (the usual source) is off-limits.
+   */
+  async attach(token) {
+    const trimmed = String(token || "").trim();
+    if (!trimmed) {
+      throw new Error("Paste your game session token first.");
+    }
+
+    const mapMeta = await this.getMapMeta(trimmed);
+    if (mapMeta?.newmap === true) {
+      throw new Error(
+        "This account is currently on a Map Room 3 world. Use the MR3 viewer instead, or migrate the account to an MR2 world.",
+      );
+    }
+
+    let baseData = {};
+    try {
+      // userid 0 + baseid 0 = "my own main yard"; the server resolves the
+      // player from the token.
+      baseData = await this.getBaseData(trimmed, { userid: 0 });
+    } catch (error) {
+      console.warn("Failed to load base data; continuing without home coordinates.", error);
+    }
+
+    const loginResponse = {
+      token: trimmed,
+      userid: Number(baseData?.userid ?? baseData?.player?.userid ?? 0) || null,
+      username: String(
+        baseData?.name || baseData?.username || baseData?.player?.name || "",
+      ).trim(),
+      pic_square: String(baseData?.pic_square || baseData?.player?.pic_square || ""),
+    };
+    return buildSessionPayload(loginResponse, baseData);
+  }
+
   async refresh(token) {
     const loginResponse = await fetchJson(this.buildApiUrl("/player/getinfo"), {
       method: "POST",
@@ -183,24 +236,57 @@ export class ApiClient {
    * Recovery is cheap in the common case: the app usually already holds the
    * rotated token, so we simply retry with it. Only when the failing token is
    * still the current one do we spend a getinfo call to mint a new one.
+   *
+   * Once recovery has actually FAILED, the session is dead until the player
+   * signs in again, and every further 401 would spend another getinfo -
+   * the single most rate-limited call there is, and one that rotates the
+   * token as a side effect. A real capture of an invalidated session shows
+   * 8 getinfo calls in 8 seconds, one per doomed zone. So the failure is
+   * latched: subsequent calls fail fast without touching the network until a
+   * genuinely new token is adopted.
    */
   async withAuthRetry(token, run) {
     try {
-      return await run(token);
+      const result = await run(token);
+      this.authExpired = false; // a working call means the session is alive
+      return result;
     } catch (error) {
       const status = Number(error?.status);
       if (status !== 401 && status !== 403) {
         throw error;
+      }
+      if (this.authExpired) {
+        throw error; // already known dead - do not spend another getinfo
       }
       let next = String(this.getCurrentToken?.() || "").trim();
       if (!next || next === token) {
         next = String((await this.refreshSession?.()) || "").trim();
       }
       if (!next || next === token) {
-        throw error; // nothing newer to try with
+        // Nothing newer to try with: recovery failed, so stop trying.
+        this.markAuthExpired();
+        throw error;
       }
       return run(next); // one retry only
     }
+  }
+
+  /** Latches the "signed out" state and tells the app once. */
+  markAuthExpired() {
+    if (this.authExpired) {
+      return;
+    }
+    this.authExpired = true;
+    try {
+      this.onAuthExpired?.();
+    } catch (error) {
+      console.warn("[BYM-MR2] auth-expired handler failed:", error);
+    }
+  }
+
+  /** Called when a genuinely new token is adopted, re-arming recovery. */
+  clearAuthExpired() {
+    this.authExpired = false;
   }
 
   async getWorlds() {
